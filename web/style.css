@@ -1,0 +1,323 @@
+:root {
+  --bg: #1e1e22;
+  --bg-2: #2a2a31;
+  --bg-3: #34343c;
+  --fg: #e8e8ec;
+  --muted: #9e9eaa;
+  --accent: #5c9eff;
+  --danger: #ff6e6e;
+  --border: #3d3d47;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Malgun Gothic",
+               sans-serif;
+  font-size: 13px;
+  user-select: none;
+  overflow: hidden;
+}
+
+body {
+  display: grid;
+  grid-template-rows: 56px 1fr 28px;   /* 툴바 더 크게 */
+}
+
+#topbar, #bottombar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;          /* 절대 줄바꿈 금지 */
+  overflow-x: auto;             /* 폭 부족 시 가로 스크롤 */
+  overflow-y: hidden;
+  flex-wrap: nowrap;
+}
+
+/* 툴바 그룹: 시각적 묶음 */
+.tb-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+/* 모드별 표시 영역은 모드 전환 시에도 폭이 흔들리지 않도록 최소폭 확보 */
+.info-group {
+  min-width: 220px;
+}
+
+#bottombar {
+  border-bottom: none;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--muted);
+  justify-content: space-between;
+}
+
+button {
+  background: var(--bg-3);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 13px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 38px;
+}
+
+/* SVG 아이콘 — 모두 currentColor로 stroke 통일 */
+.icon {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.icon-lg {
+  width: 22px;
+  height: 22px;
+  stroke-width: 1.9;
+}
+
+/* 아이콘 단독 버튼 (브러시/페인트통/Undo/Redo)는 정사각형 */
+.tool-btn, #btn-undo, #btn-redo {
+  min-width: 38px;
+  padding: 8px;
+  justify-content: center;
+}
+button:hover:not(:disabled) { background: #404049; }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+button.tool-btn.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+button.tab-btn.active {
+  background: #2c5a9e;
+  border-color: #2c5a9e;
+  color: #fff;
+}
+
+[hidden] { display: none !important; }
+.brush-only.hidden, .state-only.hidden { display: none !important; }
+
+/* 상태바: 우측 정렬, 한 줄 */
+#status {
+  margin-left: auto;
+  color: var(--muted);
+  flex-shrink: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 40%;
+}
+
+.swatch {
+  flex-shrink: 0;
+}
+
+.sep {
+  width: 1px;
+  height: 28px;
+  background: var(--border);
+  margin: 0 6px;
+  flex-shrink: 0;
+}
+
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+.toggle input { cursor: pointer; }
+
+.label { color: var(--muted); }
+.rgb-text {
+  font-family: "Consolas", "Cascadia Code", monospace;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.swatch {
+  display: inline-block;
+  width: 24px;
+  height: 24px;
+  background: #000;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.badge {
+  display: inline-block;
+  background: var(--danger);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 8px;
+  margin-left: 4px;
+  min-width: 16px;
+  text-align: center;
+}
+
+input[type="number"] {
+  background: var(--bg-3);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 12px;
+  height: 32px;
+  width: 80px;
+}
+input[type="number"]:focus {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+input[type="range"] {
+  width: 100px;
+  height: 32px;
+  vertical-align: middle;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+#canvas-area {
+  position: relative;
+  background: #15151a;
+  overflow: hidden;
+}
+
+#canvas-wrap {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+}
+
+#map-canvas, #overlay-canvas, #protect-canvas {
+  display: block;
+  image-rendering: pixelated;
+  image-rendering: -moz-crisp-edges;
+  cursor: crosshair;
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
+}
+#protect-canvas {
+  pointer-events: none;   /* 클릭 통과 */
+}
+#overlay-canvas {
+  pointer-events: none;
+  image-rendering: auto;  /* X 마커는 안티앨리어싱 OK */
+}
+
+#welcome {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  text-align: left;
+  padding: 40px;
+  color: var(--muted);
+  pointer-events: none;
+}
+#welcome h1 { color: var(--fg); margin-bottom: 12px; }
+#welcome ul { margin-top: 12px; line-height: 1.8; }
+#welcome b { color: var(--fg); }
+#welcome.hidden { display: none; }
+
+.dialog {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+.dialog.hidden { display: none; }
+.dialog-inner {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 16px 20px;
+  width: 80%;
+  max-width: 900px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+}
+.dialog-inner h2 { margin: 0 0 8px 0; }
+
+.table-wrap {
+  flex: 1;
+  overflow: auto;
+  border: 1px solid var(--border);
+  margin: 12px 0;
+  background: var(--bg);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+th, td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  font-size: 12px;
+}
+th {
+  background: var(--bg-3);
+  position: sticky;
+  top: 0;
+}
+td.color-cell { display: flex; align-items: center; gap: 6px; }
+td select {
+  background: var(--bg-3);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 2px 4px;
+  font-size: 11px;
+  max-width: 220px;
+}
+
+.dialog-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* (#status 규칙은 위쪽 .swatch와 함께 정의됨) */

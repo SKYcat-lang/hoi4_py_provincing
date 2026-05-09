@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <title>HOI4 Province Painter</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header id="topbar">
+    <!-- 공통: 파일 -->
+    <div class="tb-group">
+      <button id="btn-open" title="맵 폴더 열기">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/>
+        </svg>
+        <span>열기</span>
+      </button>
+      <button id="btn-save" title="저장 (Ctrl+S)">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M5 3h11l3 3v13a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/>
+          <path d="M7 3v6h9V3M8 14h8v6H8z"/>
+        </svg>
+        <span>저장</span>
+      </button>
+      <button id="btn-overlay-bmp" title="외부 provinces.bmp 불러와서 현재 맵에 덮어쓰기">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M14 3v6h6"/>
+          <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/>
+          <path d="M9 14l2 2 4-4"/>
+        </svg>
+        <span>BMP 덮어쓰기</span>
+      </button>
+    </div>
+
+    <span class="sep"></span>
+
+    <!-- 공통: 탭 -->
+    <div class="tb-group">
+      <button id="tab-province" class="tab-btn active" title="프로빈스 편집 (1)">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M3 6l6-2 6 2 6-2v14l-6 2-6-2-6 2V6z"/>
+          <path d="M9 4v16M15 6v16"/>
+        </svg>
+        <span>프로빈스 편집</span>
+      </button>
+      <button id="tab-state" class="tab-btn" title="스테이트 할당 (2)">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M3 21h18M5 21V11l7-5 7 5v10"/>
+          <path d="M9 21v-6h6v6"/>
+        </svg>
+        <span>스테이트 할당</span>
+      </button>
+      <button id="tab-split" class="tab-btn" title="자동 분할 (3)">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 3v18M3 12h18"/>
+          <circle cx="6" cy="6" r="2"/>
+          <circle cx="18" cy="6" r="2"/>
+          <circle cx="6" cy="18" r="2"/>
+          <circle cx="18" cy="18" r="2"/>
+        </svg>
+        <span>자동 분할</span>
+      </button>
+    </div>
+
+    <span class="sep"></span>
+
+    <!-- 프로빈스 편집 모드 전용 도구 -->
+    <div class="tb-group brush-only">
+      <button id="btn-tool-brush" class="tool-btn active" title="브러시 (B)">
+        <svg class="icon icon-lg" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M14 4l6 6-9 9-3 1-1-1 1-3 9-9z"/>
+          <path d="M13 5l6 6"/>
+        </svg>
+      </button>
+      <button id="btn-tool-fill" class="tool-btn" title="페인트통 (G) - Shift+클릭으로 임시 사용">
+        <svg class="icon icon-lg" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M5 11l7-7 8 8-7 7a2 2 0 0 1-3 0l-5-5a2 2 0 0 1 0-3z"/>
+          <path d="M5 11h14"/>
+          <path d="M19 16c1 2 2 3 2 4a2 2 0 0 1-4 0c0-1 1-2 2-4z" fill="currentColor" stroke="none"/>
+        </svg>
+      </button>
+      <button id="btn-pick-color" title="현재 색을 사용 안 된 새 색으로 발급">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r="9"/>
+          <circle cx="7.5" cy="10.5" r="1.3" fill="currentColor" stroke="none"/>
+          <circle cx="11" cy="7" r="1.3" fill="currentColor" stroke="none"/>
+          <circle cx="16" cy="9.5" r="1.3" fill="currentColor" stroke="none"/>
+          <circle cx="16.5" cy="14.5" r="1.3" fill="currentColor" stroke="none"/>
+          <path d="M12 21a3 3 0 0 0 0-6"/>
+        </svg>
+        <span>새 색상</span>
+      </button>
+      <button id="btn-undo" disabled title="실행취소 (Ctrl+Z)">
+        <svg class="icon icon-lg" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M9 14L4 9l5-5"/>
+          <path d="M4 9h11a5 5 0 0 1 0 10h-4"/>
+        </svg>
+      </button>
+      <button id="btn-redo" disabled title="다시실행 (Ctrl+Y)">
+        <svg class="icon icon-lg" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M15 14l5-5-5-5"/>
+          <path d="M20 9H9a5 5 0 0 0 0 10h4"/>
+        </svg>
+      </button>
+    </div>
+
+    <span class="sep brush-only"></span>
+
+    <!-- 공통: 보호 토글 -->
+    <div class="tb-group">
+      <label class="toggle" title="호수 프로빈스 변경/편입 방지">
+        <input type="checkbox" id="toggle-protect-lake" checked />
+        <span>호수 보호</span>
+      </label>
+      <label class="toggle" title="바다 프로빈스 변경/편입 방지">
+        <input type="checkbox" id="toggle-protect-sea" checked />
+        <span>바다 보호</span>
+      </label>
+    </div>
+
+    <span class="sep"></span>
+
+    <!-- 공통: X-crossing 진단 -->
+    <div class="tb-group">
+      <button id="btn-xcheck" title="X-crossing 전체 스캔 (2×2 4색 만나는 지점)">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r="9"/>
+          <path d="M12 8v5M12 16h.01"/>
+        </svg>
+        <span>X 검사</span>
+        <span id="xcount-badge" class="badge" hidden>0</span>
+      </button>
+      <button id="btn-xclear" title="마커 끄기" hidden>
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M6 6l12 12M18 6L6 18"/>
+        </svg>
+      </button>
+    </div>
+
+    <span class="sep"></span>
+
+    <!-- 모드별 정보 표시 (공간은 동일) -->
+    <div class="tb-group info-group brush-only">
+      <span class="label">현재 색</span>
+      <span id="current-swatch" class="swatch"></span>
+      <span id="current-rgb" class="rgb-text">#FF0000</span>
+    </div>
+    <div class="tb-group info-group state-only" hidden>
+      <span class="label">스테이트</span>
+      <span id="selected-state-swatch" class="swatch"></span>
+      <span id="selected-state-label" class="rgb-text">없음 (클릭으로 선택)</span>
+    </div>
+    <div class="tb-group info-group split-only" hidden>
+      <label class="label" for="split-avg-input">평균 px</label>
+      <input id="split-avg-input" type="number" min="1" step="1" value="5000"
+             title="새 조각의 목표 평균 픽셀 수 (최소 1)" />
+      <span class="label">최소 px</span>
+      <input id="split-min-input" type="number" min="0" step="1" value=""
+             placeholder="auto" title="비우면 평균의 30%" />
+      <label class="label" for="split-noise-input">노이즈</label>
+      <input id="split-noise-input" type="range" min="0" max="100" step="1" value="50"
+             title="0% = 깔끔한 패턴, 100% = 흐물흐물 자연스러움" />
+      <span id="split-noise-readout" class="rgb-text">50%</span>
+      <button id="btn-split-run" title="선택한 프로빈스 분할 실행">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M5 12h14M12 5l7 7-7 7"/>
+        </svg>
+        <span>분할</span>
+      </button>
+    </div>
+
+    <!-- 우측 끝: 상태 -->
+    <span id="status">맵을 로드해주세요</span>
+  </header>
+
+  <main id="canvas-area">
+    <div id="canvas-wrap">
+      <canvas id="map-canvas"></canvas>
+      <canvas id="protect-canvas"></canvas>
+      <canvas id="overlay-canvas"></canvas>
+    </div>
+    <div id="welcome">
+      <h1>HOI4 Province Painter</h1>
+      <p>왼쪽 위 <b>"맵 폴더 열기"</b> 버튼으로 <code>provinces.bmp</code>가 들어 있는 <code>map/</code> 폴더(또는 모드 루트)를 선택하세요.</p>
+      <ul>
+        <li><b>탭 버튼</b>: 프로빈스 편집 / 스테이트 할당 / 자동 분할 모드 전환</li>
+        <li><b>[자동 분할] 좌클릭</b>: 그 위치의 프로빈스를 선택 → '분할' 버튼으로 평균 px 기준 4가지 알고리즘 혼합 분할</li>
+        <li><b>[프로빈스 편집] 좌클릭 드래그</b>: 1×1 픽셀 채색 (브러시)</li>
+        <li><b>[프로빈스 편집] B / G</b>: 브러시 / 페인트통 도구 전환</li>
+        <li><b>[스테이트 할당] 좌클릭</b>: 그 위치의 스테이트를 현재 선택으로 지정</li>
+        <li><b>[스테이트 할당] Shift+좌클릭</b>: 클릭한 프로빈스를 현재 스테이트에 편입</li>
+        <li><b>우클릭 (짧게)</b>: 스포이드 (해당 픽셀 정보)</li>
+        <li><b>우클릭 드래그</b>: 화면 팬</li>
+        <li><b>휠</b>: 줌 (커서 기준)</li>
+        <li><b>Ctrl+Z / Ctrl+Y</b>: 실행취소 / 다시실행 (브러시 모드)</li>
+        <li><b>Ctrl+S</b>: 저장 (definition.csv, state, strategic regions 자동 갱신)</li>
+      </ul>
+    </div>
+  </main>
+
+  <footer id="bottombar">
+    <span id="cursor-info">-</span>
+    <span id="zoom-info">100%</span>
+  </footer>
+
+  <!-- 저장 다이얼로그 -->
+  <div id="save-dialog" class="dialog hidden">
+    <div class="dialog-inner">
+      <h2>저장 미리보기</h2>
+      <p id="save-summary"></p>
+      <div class="table-wrap">
+        <table id="save-table">
+          <thead>
+            <tr>
+              <th>색상</th><th>새 ID</th><th>타입</th><th>지형</th><th>대륙</th><th>해안</th><th>스테이트</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="dialog-buttons">
+        <button id="btn-save-cancel">취소</button>
+        <button id="btn-save-confirm" class="primary">저장 실행</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
