@@ -550,14 +550,26 @@ async function checkRiversPalette() {
   }
   if (fixBtn) fixBtn.hidden = (r.paletteMatches && r.isPalettedBmp);
 
+  // 진단 메시지: 가장 우선 순위 높은 문제부터
+  const issues = [];
   if (!r.isPalettedBmp) {
-    setStatus(`rivers.bmp가 인덱스 BMP가 아님 (mode=${r.mode}). '교정' 버튼으로 표준 팔레트로 변환하세요.`);
-  } else if (r.paletteMatches) {
-    setStatus('rivers.bmp 팔레트가 표준과 일치 ✓');
-  } else if (r.invalidIndices && r.invalidIndices.length > 0) {
-    setStatus(`rivers.bmp에 표준 외 인덱스 ${r.invalidIndices.length}개: ${r.invalidIndices.slice(0,5).join(',')}... '교정' 버튼으로 자동 수정`);
+    issues.push(`인덱스 BMP 아님 (mode=${r.mode})`);
+  }
+  if (r.sizeMatch === false) {
+    issues.push(`provinces.bmp와 크기 불일치 (${r.size?.[0]}×${r.size?.[1]} vs ${r.provincesSize?.[0]}×${r.provincesSize?.[1]})`);
+  }
+  if (r.invalidIndices && r.invalidIndices.length > 0) {
+    issues.push(`표준 외 인덱스 ${r.invalidIndices.length}개 (${r.invalidIndices.slice(0,5).join(',')}${r.invalidIndices.length>5?'...':''})`);
+  }
+  if (r.standardPaletteCheck && r.standardPaletteComplete === false) {
+    const missing = r.standardPaletteCheck.filter(e => !e.ok).map(e => e.index);
+    issues.push(`표준 팔레트 엔트리 ${missing.length}개 누락/불일치 (idx ${missing.slice(0,8).join(',')}${missing.length>8?'...':''})`);
+  }
+
+  if (issues.length === 0) {
+    setStatus('rivers.bmp: 모든 검사 통과 ✓ (팔레트, 크기, 표준 엔트리)');
   } else {
-    setStatus(`rivers.bmp 인덱스 RGB가 표준과 다름. '교정' 버튼으로 자동 수정`);
+    setStatus(`rivers.bmp 문제 ${issues.length}건: ${issues.join(' / ')}. '교정' 버튼으로 자동 수정`);
   }
 }
 

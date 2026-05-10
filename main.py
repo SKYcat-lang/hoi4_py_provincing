@@ -537,10 +537,13 @@ class Api:
     # -------- rivers.bmp 검증 + 교정 ----------
 
     def validate_rivers(self) -> dict:
-        """rivers.bmp 팔레트 표준 준수 검사."""
+        """rivers.bmp 팔레트/크기/전체 엔트리 종합 검증."""
         if self.paths is None:
             return {"ok": False, "error": "맵이 로드되지 않았습니다."}
-        return validate_rivers_bmp(self.paths.rivers_bmp)
+        return validate_rivers_bmp(
+            self.paths.rivers_bmp,
+            provinces_path=self.paths.provinces_bmp,
+        )
 
     def fix_rivers(self) -> dict:
         """rivers.bmp를 표준 팔레트로 자동 교정 (백업 포함)."""

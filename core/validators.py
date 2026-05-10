@@ -196,24 +196,22 @@ RIVERS_STANDARD_PALETTE: dict[int, tuple[int, int, int]] = {
 }
 
 
-def validate_rivers_bmp(path: str) -> dict:
-    """rivers.bmp 팔레트 검증.
+def validate_rivers_bmp(path: str, provinces_path: str | None = None) -> dict:
+    """rivers.bmp 팔레트 + 메타데이터 종합 검증.
 
-    검사 항목:
-      - 파일 존재 여부
-      - 8-bit indexed (palette mode)인지
-      - 사용 인덱스가 표준 팔레트(0-11, 254, 255) 내에 있는지
-      - 각 인덱스의 RGB가 표준 팔레트 값과 일치하는지
+    HOI4가 'Palette in rivers.bmp is probably not correct' 에러를 내는 조건들을
+    빠짐없이 검사한다 (위키 https://hoi4.paradoxwikis.com/Map_modding 기준):
 
-    반환: {
-      ok: bool,
-      isPalettedBmp: 8-bit indexed인지,
-      paletteEntries: [{index, currentRgb, expectedRgb, isStandard}, ...]
-                      (사용 중인 인덱스의 현재 색과 표준 색 비교),
-      invalidIndices: 표준 팔레트 범위 밖 인덱스들,
-      paletteMatches: True if 모든 사용 인덱스가 표준 RGB와 정확히 일치,
-      error: 실패 메시지
-    }
+      1. 파일 존재
+      2. 8-bit indexed (P-mode)
+      3. provinces.bmp와 크기 일치 (provinces_path 주어진 경우)
+      4. 사용된 인덱스가 모두 표준 팔레트(0~11, 254, 255) 내에 있는지
+      5. 사용된 인덱스의 RGB가 표준값과 일치하는지
+      6. **표준 인덱스 14개의 RGB가 팔레트에 정확히 정의되어 있는지**
+         (사용 안 했어도 팔레트 엔트리 자체가 표준이어야 함 — HOI4가 이걸 가장
+          엄격히 체크해서 'palette probably not correct' 에러를 띄움)
+
+    반환: 위 모든 검사 결과 + paletteMatches(전체 OK 여부).
     """
     if not os.path.isfile(path):
         return {"ok": False, "error": f"파일이 없습니다: {path}"}
@@ -227,19 +225,36 @@ def validate_rivers_bmp(path: str) -> dict:
     used_indices: list[int] = []
     palette_entries: list[dict] = []
     invalid_indices: list[int] = []
+    standard_palette_check: list[dict] = []
+    standard_palette_complete = True
     palette_matches = True
+
+    # provinces.bmp와 크기 비교
+    size_match = None
+    provinces_size = None
+    if provinces_path and os.path.isfile(provinces_path):
+        try:
+            with Image.open(provinces_path) as pimg:
+                provinces_size = (pimg.size[0], pimg.size[1])
+                size_match = (pimg.size == img.size)
+                if not size_match:
+                    palette_matches = False
+        except Exception:
+            size_match = None
 
     if is_paletted:
         arr = np.array(img, dtype=np.uint8)
         unique = np.unique(arr).tolist()
         used_indices = [int(i) for i in unique]
         palette = img.getpalette() or []
+        palette_size_bytes = len(palette)
 
+        # 5: 사용된 인덱스의 RGB 일치 검사
         for idx in used_indices:
             current_rgb = (
-                int(palette[idx * 3]) if idx * 3 < len(palette) else 0,
-                int(palette[idx * 3 + 1]) if idx * 3 + 1 < len(palette) else 0,
-                int(palette[idx * 3 + 2]) if idx * 3 + 2 < len(palette) else 0,
+                int(palette[idx * 3]) if idx * 3 < palette_size_bytes else 0,
+                int(palette[idx * 3 + 1]) if idx * 3 + 1 < palette_size_bytes else 0,
+                int(palette[idx * 3 + 2]) if idx * 3 + 2 < palette_size_bytes else 0,
             )
             expected = RIVERS_STANDARD_PALETTE.get(idx)
             is_standard = expected is not None and current_rgb == expected
@@ -255,8 +270,29 @@ def validate_rivers_bmp(path: str) -> dict:
                 "expectedRgb": list(expected) if expected else None,
                 "isStandard": is_standard,
             })
+
+        # 6: 표준 인덱스 전체(14개)의 RGB가 팔레트에 정확히 있는지 검사
+        # 사용 안 한 인덱스라도 게임이 팔레트 엔트리를 검사하므로 매우 중요.
+        for idx, expected in RIVERS_STANDARD_PALETTE.items():
+            if idx * 3 + 2 < palette_size_bytes:
+                current_rgb = (
+                    int(palette[idx * 3]),
+                    int(palette[idx * 3 + 1]),
+                    int(palette[idx * 3 + 2]),
+                )
+            else:
+                current_rgb = None
+            ok_entry = (current_rgb == expected)
+            if not ok_entry:
+                standard_palette_complete = False
+                palette_matches = False
+            standard_palette_check.append({
+                "index": idx,
+                "expectedRgb": list(expected),
+                "currentRgb": list(current_rgb) if current_rgb else None,
+                "ok": ok_entry,
+            })
     else:
-        # 인덱스 모드가 아니면 자동 판정
         palette_matches = False
 
     return {
@@ -264,9 +300,13 @@ def validate_rivers_bmp(path: str) -> dict:
         "isPalettedBmp": is_paletted,
         "mode": img.mode,
         "size": [img.size[0], img.size[1]],
+        "provincesSize": list(provinces_size) if provinces_size else None,
+        "sizeMatch": size_match,
         "usedIndices": used_indices,
         "paletteEntries": palette_entries,
         "invalidIndices": invalid_indices,
+        "standardPaletteCheck": standard_palette_check,
+        "standardPaletteComplete": standard_palette_complete,
         "paletteMatches": palette_matches,
     }
 
