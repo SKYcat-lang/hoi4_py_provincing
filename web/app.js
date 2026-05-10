@@ -68,6 +68,15 @@ const protectCanvas = $('#protect-canvas');
 const protectCtx = protectCanvas.getContext('2d', { willReadFrequently: true });
 protectCtx.imageSmoothingEnabled = false;
 
+// 레이어 캔버스 (rivers, terrain)
+const riversLayerCanvas = $('#rivers-layer-canvas');
+const riversLayerCtx = riversLayerCanvas.getContext('2d');
+riversLayerCtx.imageSmoothingEnabled = false;
+
+const terrainLayerCanvas = $('#terrain-layer-canvas');
+const terrainLayerCtx = terrainLayerCanvas.getContext('2d');
+terrainLayerCtx.imageSmoothingEnabled = false;
+
 // X-crossing 좌표 [(x,y), ...]
 state.xcrossings = [];
 
@@ -91,6 +100,32 @@ function updateCurrentColorLabel() {
 }
 
 // ---------- 변환 ----------
+// ---------- 레이어 (rivers / terrain) ----------
+function loadOverlayLayer(layerCanvas, layerCtx, dataUrl) {
+  if (!dataUrl) {
+    // 데이터 없음 — 캔버스 비움
+    layerCtx.clearRect(0, 0, layerCanvas.width, layerCanvas.height);
+    return;
+  }
+  const img = new Image();
+  img.decoding = 'async';
+  img.onload = () => {
+    layerCtx.clearRect(0, 0, layerCanvas.width, layerCanvas.height);
+    layerCtx.drawImage(img, 0, 0);
+  };
+  img.onerror = () => {
+    console.warn('레이어 이미지 로드 실패');
+  };
+  img.src = dataUrl;
+}
+
+function applyLayerVisibility(layerCanvas, enabled, opacityPercent) {
+  // CSS opacity로 투명도 적용. enabled=false면 0
+  const op = enabled ? Math.max(0, Math.min(1, opacityPercent / 100)) : 0;
+  layerCanvas.style.opacity = String(op);
+  // pointer-events는 항상 none이라 클릭 통과는 보장
+}
+
 function applyTransform() {
   const t = `translate(${state.panX}px, ${state.panY}px) scale(${state.zoom})`;
   canvas.style.transformOrigin = '0 0';
@@ -99,7 +134,13 @@ function applyTransform() {
   overlayCanvas.style.transform = t;
   protectCanvas.style.transformOrigin = '0 0';
   protectCanvas.style.transform = t;
+  riversLayerCanvas.style.transformOrigin = '0 0';
+  riversLayerCanvas.style.transform = t;
+  terrainLayerCanvas.style.transformOrigin = '0 0';
+  terrainLayerCanvas.style.transform = t;
   updateZoomLabel();
+  // SVG 마커는 transform과 별개로 화면 좌표로 다시 계산
+  renderMarkers();
 }
 
 function screenToPixel(clientX, clientY) {
@@ -224,30 +265,96 @@ function setMode(name) {
 }
 
 // ---------- X-crossing 마커 ----------
-function drawXcrossingOverlay() {
-  const w = overlayCanvas.width;
-  const h = overlayCanvas.height;
-  overlayCtx.clearRect(0, 0, w, h);
-  if (!state.xcrossings || state.xcrossings.length === 0) return;
+// 머티리얼 핀 SVG 마커 (줌과 무관한 화면 픽셀 크기)
+// 핀 사이즈 32×42 (헤드 직경 22, 끝점이 마커 위치)
+const PIN_VIEWBOX_W = 32;
+const PIN_VIEWBOX_H = 42;
+// SVG path: 위가 둥근 핀, 끝이 뾰족하게 (0, 42)에서 만남
+// (16, 42)가 핀의 끝점 (마커 위치)
+const PIN_BODY_PATH =
+  'M16 0 C 7 0, 0 7, 0 16 C 0 23, 7 30, 16 42 C 25 30, 32 23, 32 16 C 32 7, 25 0, 16 0 Z';
 
-  // 마커 외곽: 빨간 원, 중앙 십자
-  // 좌표는 2×2 윈도우의 좌상단이므로 마커 중심은 (x+1, y+1)
-  overlayCtx.lineWidth = 1;
-  overlayCtx.strokeStyle = '#ff3030';
-  overlayCtx.fillStyle = 'rgba(255, 48, 48, 0.35)';
-  for (const [x, y] of state.xcrossings) {
-    const cx = x + 1;
-    const cy = y + 1;
-    // 원 (반지름 6, 줌이 작을 땐 작게 보이지만 transform으로 함께 커짐)
-    overlayCtx.beginPath();
-    overlayCtx.arc(cx, cy, 6, 0, Math.PI * 2);
-    overlayCtx.fill();
-    overlayCtx.stroke();
-    // 중심 점
-    overlayCtx.fillStyle = '#ff0000';
-    overlayCtx.fillRect(cx - 0.5, cy - 0.5, 1, 1);
-    overlayCtx.fillStyle = 'rgba(255, 48, 48, 0.35)';
+const PIN_GLYPHS = {
+  // X-crossing: 큰 X 모양
+  xcross: '<path class="pin-glyph" d="M11 11 L21 21 M21 11 L11 21" stroke="#fff" stroke-width="2.4" stroke-linecap="round" fill="none"/>',
+  // One-pixel: 느낌표
+  onepx: '<path class="pin-glyph" d="M16 8 L16 18 M16 22 L16 23.6" stroke="#fff" stroke-width="2.6" stroke-linecap="round" fill="none"/>',
+  // Exclave: 분리된 두 점 (월경지 아이콘)
+  exclave: '<path class="pin-glyph" d="M11 13 a3 3 0 1 1 0 0.01 Z M21 19 a3 3 0 1 1 0 0.01 Z" fill="#fff"/>',
+};
+
+function _pinSvg(kind) {
+  const glyph = PIN_GLYPHS[kind] || '';
+  return `<g class="marker-pin kind-${kind}">
+    <path class="pin-body" d="${PIN_BODY_PATH}"/>
+    ${glyph}
+  </g>`;
+}
+
+const markerSvg = $('#marker-svg');
+
+function renderMarkers() {
+  // 모든 마커를 SVG로 다시 그림. 화면 좌표 = (이미지 좌표 × zoom + pan).
+  if (!markerSvg) return;
+
+  const z = state.zoom;
+  const px0 = state.panX;
+  const py0 = state.panY;
+
+  // 핀 끝점이 마커 위치에 오도록 translate 보정
+  // 핀 사이즈는 화면 픽셀 28×38 (가독성 + 클러터 균형)
+  const PIN_W = 28;
+  const PIN_H = 38;
+  const offsetX = -PIN_W / 2;        // 핀 중앙 가로 보정
+  const offsetY = -PIN_H;            // 핀 끝점이 마커 좌표에 오도록 상단 띄움
+
+  const parts = [];
+
+  function pushPin(imgX, imgY, kind) {
+    const sx = imgX * z + px0;
+    const sy = imgY * z + py0;
+    // 화면 밖이면 그리지 않음 (성능 + 클러터)
+    if (sx < -50 || sy < -50 || sx > markerSvg.clientWidth + 50 || sy > markerSvg.clientHeight + 50) return;
+    parts.push(
+      `<svg x="${(sx + offsetX).toFixed(1)}" y="${(sy + offsetY).toFixed(1)}" ` +
+      `width="${PIN_W}" height="${PIN_H}" viewBox="0 0 ${PIN_VIEWBOX_W} ${PIN_VIEWBOX_H}" ` +
+      `style="overflow:visible">${_pinSvg(kind)}</svg>`
+    );
   }
+
+  // X-crossing: 좌표는 2x2 좌상단 → 마커 위치는 (x+1, y+1)
+  if (state.xcrossings) {
+    for (const [x, y] of state.xcrossings) {
+      pushPin(x + 1, y + 1, 'xcross');
+    }
+  }
+  // One-pixel
+  if (state.onePxCoords) {
+    for (const [x, y] of state.onePxCoords) {
+      pushPin(x + 0.5, y + 0.5, 'onepx');
+    }
+  }
+  // Exclave: 픽셀 수가 많을 수 있으므로 컴포넌트별 대표 1픽셀만 핀으로 표시.
+  // (각 exclave 마다 첫 픽셀)
+  if (state.exclaveGroups && state.exclaveGroups.length > 0) {
+    for (const grp of state.exclaveGroups) {
+      if (grp.pixels && grp.pixels.length > 0) {
+        const [px, py] = grp.pixels[0];
+        pushPin(px + 0.5, py + 0.5, 'exclave');
+      }
+    }
+  }
+
+  markerSvg.innerHTML = parts.join('');
+}
+
+// 호환성: 기존 호출처가 drawXcrossingOverlay 사용 중이면 SVG 렌더로 위임
+function drawXcrossingOverlay() {
+  // overlay-canvas 비우기 (이전 잔상 제거)
+  if (overlayCanvas && overlayCanvas.width > 0) {
+    overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+  }
+  renderMarkers();
 }
 
 // ---------- 호수/바다 보호 검정 오버레이 ----------
@@ -306,21 +413,166 @@ function refreshProtectOverlay() {
 function setXcrossings(coords) {
   state.xcrossings = coords || [];
   const badge = $('#xcount-badge');
-  const clearBtn = $('#btn-xclear');
-  if (state.xcrossings.length > 0) {
-    badge.hidden = false;
-    badge.textContent = state.xcrossings.length.toString();
-    clearBtn.hidden = false;
-  } else {
-    badge.hidden = true;
-    clearBtn.hidden = true;
+  const clearBtn = $('#btn-check-xcross-clear');
+  if (badge) {
+    if (state.xcrossings.length > 0) {
+      badge.hidden = false;
+      badge.textContent = state.xcrossings.length.toString();
+      badge.classList.add('warn');
+      badge.classList.remove('ok');
+    } else {
+      badge.hidden = true;
+    }
   }
+  if (clearBtn) clearBtn.hidden = state.xcrossings.length === 0;
   drawXcrossingOverlay();
 }
 
 function clearXcrossings() {
   setXcrossings([]);
   setStatus('X-crossing 마커 제거');
+}
+
+// ---------- One-pixel province 검사 ----------
+state.onePxCoords = [];
+
+function setOnePxMarkers(coords) {
+  state.onePxCoords = coords || [];
+  const badge = $('#onepx-badge');
+  const clearBtn = $('#btn-check-onepx-clear');
+  if (badge) {
+    if (state.onePxCoords.length > 0) {
+      badge.hidden = false;
+      badge.textContent = state.onePxCoords.length.toString();
+      badge.classList.add('warn');
+      badge.classList.remove('ok');
+    } else {
+      badge.hidden = true;
+    }
+  }
+  if (clearBtn) clearBtn.hidden = state.onePxCoords.length === 0;
+  drawXcrossingOverlay();  // 통합 오버레이로 X-crossing+OnePx 함께 갱신
+}
+
+function drawOnePxOverlay() {
+  // 통합 drawXcrossingOverlay에서 함께 처리하므로 여기선 위임
+  drawXcrossingOverlay();
+}
+
+async function scanOnePxProvinces() {
+  if (!state.loaded) return;
+  setStatus('One-pixel 프로빈스 스캔 중...');
+  const r = await window.pywebview.api.scan_one_pixel_provinces(1000);
+  if (!r || !r.ok) {
+    setStatus(`스캔 실패: ${r ? r.error : 'unknown'}`);
+    return;
+  }
+  setOnePxMarkers(r.coords);
+  if (r.count === 0) {
+    setStatus('One-pixel 프로빈스 0건. 깨끗합니다 ✓');
+  } else {
+    setStatus(`One-pixel 프로빈스 ${r.count}건 발견 (노란 마커). 첫 좌표: ${r.coords[0][0]},${r.coords[0][1]}`);
+  }
+}
+
+function clearOnePxMarkers() {
+  setOnePxMarkers([]);
+  setStatus('One-pixel 마커 제거');
+}
+
+// ---------- Exclave (월경지) 검사 ----------
+state.exclaveGroups = [];   // [{rgb, size, pixels: [[x,y],...]}, ...]
+
+function setExclaveMarkers(exclaves) {
+  // exclaves: [{rgb, size, pixels: [[x,y],...]}, ...]
+  state.exclaveGroups = exclaves || [];
+  const badge = $('#exclave-badge');
+  if (badge) {
+    if (state.exclaveGroups.length > 0) {
+      badge.hidden = false;
+      badge.textContent = String(state.exclaveGroups.length);
+      badge.classList.add('warn');
+      badge.classList.remove('ok');
+    } else {
+      badge.hidden = true;
+    }
+  }
+  renderMarkers();
+}
+
+function clearExclaveMarkers() {
+  state.exclaveGroups = [];
+  const badge = $('#exclave-badge');
+  if (badge) badge.hidden = true;
+  renderMarkers();
+}
+
+async function scanExclaves() {
+  if (!state.loaded) return;
+  setStatus('월경지 스캔 중... (전체 BMP BFS, 5~15초 소요 가능)');
+  const r = await window.pywebview.api.scan_exclaves(2000);
+  if (!r || !r.ok) {
+    setStatus(`월경지 스캔 실패: ${r ? r.error : 'unknown'}`);
+    return;
+  }
+  setExclaveMarkers(r.exclaves);
+  if (r.count === 0) {
+    setStatus('월경지 0건. 깨끗합니다 ✓');
+  } else {
+    setStatus(`월경지 ${r.count}건 (총 ${r.totalPixelMarkers} 픽셀). 빨강 빗금 표시. 캔버스 클릭으로 제거.`);
+  }
+}
+
+// ---------- rivers.bmp 팔레트 검증/교정 ----------
+async function checkRiversPalette() {
+  if (!state.loaded) return;
+  setStatus('rivers.bmp 팔레트 검사 중...');
+  const r = await window.pywebview.api.validate_rivers();
+  if (!r || !r.ok) {
+    setStatus(`rivers 검사 실패: ${r ? r.error : 'unknown'}`);
+    return;
+  }
+  const badge = $('#rivers-status-badge');
+  const fixBtn = $('#btn-fix-rivers');
+  if (badge) {
+    badge.hidden = false;
+    if (r.paletteMatches && r.isPalettedBmp) {
+      badge.textContent = 'OK';
+      badge.classList.remove('warn');
+      badge.classList.add('ok');
+    } else {
+      const issues = (r.invalidIndices ? r.invalidIndices.length : 0)
+                   + (r.isPalettedBmp ? 0 : 1);
+      badge.textContent = issues > 0 ? `!${issues}` : '!';
+      badge.classList.remove('ok');
+      badge.classList.add('warn');
+    }
+  }
+  if (fixBtn) fixBtn.hidden = (r.paletteMatches && r.isPalettedBmp);
+
+  if (!r.isPalettedBmp) {
+    setStatus(`rivers.bmp가 인덱스 BMP가 아님 (mode=${r.mode}). '교정' 버튼으로 표준 팔레트로 변환하세요.`);
+  } else if (r.paletteMatches) {
+    setStatus('rivers.bmp 팔레트가 표준과 일치 ✓');
+  } else if (r.invalidIndices && r.invalidIndices.length > 0) {
+    setStatus(`rivers.bmp에 표준 외 인덱스 ${r.invalidIndices.length}개: ${r.invalidIndices.slice(0,5).join(',')}... '교정' 버튼으로 자동 수정`);
+  } else {
+    setStatus(`rivers.bmp 인덱스 RGB가 표준과 다름. '교정' 버튼으로 자동 수정`);
+  }
+}
+
+async function fixRiversPalette() {
+  if (!state.loaded) return;
+  if (!confirm('rivers.bmp 팔레트를 HOI4 표준으로 교정합니다.\n원본은 rivers.bmp.bak로 백업됩니다.\n계속할까요?')) return;
+  setStatus('rivers.bmp 교정 중...');
+  const r = await window.pywebview.api.fix_rivers();
+  if (!r || !r.ok) {
+    setStatus(`교정 실패: ${r ? r.error : 'unknown'}`);
+    return;
+  }
+  setStatus(`교정 완료: ${r.replacedPixels} 픽셀이 표준 팔레트로 매핑됨${r.backupPath ? ' (백업: ' + r.backupPath + ')' : ''}`);
+  // 다시 검사해서 OK 배지로
+  await checkRiversPalette();
 }
 
 async function scanXcrossingsAll() {
@@ -595,6 +847,17 @@ async function performFloodFill(x, y) {
 function onMouseDown(e) {
   if (!state.loaded) return;
   const [x, y] = screenToPixel(e.clientX, e.clientY);
+
+  // 월경지 마커가 표시 중이면, 어떤 클릭이든 (좌/우 모두) 마커만 지우고 끝.
+  // 일회성 시각 알림이라 "다시 작업하려면 한 번 클릭"이 자연스럽다.
+  if (state.exclaveGroups && state.exclaveGroups.length > 0) {
+    state.exclaveGroups = [];
+    const badge = $('#exclave-badge');
+    if (badge) badge.hidden = true;
+    renderMarkers();
+    setStatus('월경지 마커 제거');
+    return;
+  }
 
   if (e.button === 0) {
     // 스테이트 할당 모드 우선 분기
@@ -896,6 +1159,14 @@ async function applyLoadedMap(result) {
   overlayCanvas.height = state.height;
   protectCanvas.width = state.width;
   protectCanvas.height = state.height;
+  riversLayerCanvas.width = state.width;
+  riversLayerCanvas.height = state.height;
+  terrainLayerCanvas.width = state.width;
+  terrainLayerCanvas.height = state.height;
+
+  // 레이어 BMP들을 비동기 로드 (실패해도 본체에 영향 없음)
+  loadOverlayLayer(riversLayerCanvas, riversLayerCtx, result.riversImageDataUrl);
+  loadOverlayLayer(terrainLayerCanvas, terrainLayerCtx, result.terrainImageDataUrl);
 
   // 이미지 로드 → ImageData로
   const img = new Image();
@@ -925,6 +1196,13 @@ async function applyLoadedMap(result) {
   state.redoStack = [];
   state.stateImageDirty = true;
   setXcrossings([]);  // 마커 초기화
+  setOnePxMarkers([]);
+  clearExclaveMarkers();
+  // rivers/onepx 배지도 초기화
+  const riversBadge = $('#rivers-status-badge');
+  const fixBtn = $('#btn-fix-rivers');
+  if (riversBadge) riversBadge.hidden = true;
+  if (fixBtn) fixBtn.hidden = true;
   refreshProtectOverlay();
   updateUndoButtons();
   updateSelectedStateLabel();
@@ -1212,8 +1490,61 @@ window.addEventListener('pywebviewready', () => {
     });
   }
 
-  $('#btn-xcheck').addEventListener('click', scanXcrossingsAll);
-  $('#btn-xclear').addEventListener('click', clearXcrossings);
+  // 검증 패널 버튼들
+  $('#btn-check-xcross').addEventListener('click', scanXcrossingsAll);
+  $('#btn-check-xcross-clear').addEventListener('click', clearXcrossings);
+  $('#btn-check-onepx').addEventListener('click', scanOnePxProvinces);
+  $('#btn-check-onepx-clear').addEventListener('click', clearOnePxMarkers);
+  $('#btn-check-exclave').addEventListener('click', scanExclaves);
+  $('#btn-check-rivers').addEventListener('click', checkRiversPalette);
+  $('#btn-fix-rivers').addEventListener('click', fixRiversPalette);
+
+  // 검증 패널 접기/펼치기
+  const checkPanel = $('#check-panel');
+  const checkPanelToggle = $('#check-panel-toggle');
+  if (checkPanelToggle) {
+    checkPanelToggle.addEventListener('click', () => {
+      const collapsed = checkPanel.classList.toggle('collapsed');
+      checkPanelToggle.textContent = collapsed ? '+' : '−';
+      checkPanelToggle.title = collapsed ? '패널 펼치기' : '패널 접기';
+    });
+  }
+
+  // 레이어 컨트롤
+  const riversToggle = $('#layer-rivers-toggle');
+  const riversOpacity = $('#layer-rivers-opacity');
+  const riversReadout = $('#layer-rivers-opacity-readout');
+  const terrainToggle = $('#layer-terrain-toggle');
+  const terrainOpacity = $('#layer-terrain-opacity');
+  const terrainReadout = $('#layer-terrain-opacity-readout');
+
+  function refreshRivers() {
+    applyLayerVisibility(riversLayerCanvas,
+                         riversToggle.checked,
+                         parseInt(riversOpacity.value, 10));
+    riversReadout.textContent = `${riversOpacity.value}%`;
+  }
+  function refreshTerrain() {
+    applyLayerVisibility(terrainLayerCanvas,
+                         terrainToggle.checked,
+                         parseInt(terrainOpacity.value, 10));
+    terrainReadout.textContent = `${terrainOpacity.value}%`;
+  }
+  riversToggle.addEventListener('change', refreshRivers);
+  riversOpacity.addEventListener('input', refreshRivers);
+  terrainToggle.addEventListener('change', refreshTerrain);
+  terrainOpacity.addEventListener('input', refreshTerrain);
+  refreshRivers();
+  refreshTerrain();
+
+  // 레이어 패널 접기/펼치기
+  const layerPanel = $('#layer-panel');
+  const layerPanelToggle = $('#layer-panel-toggle');
+  layerPanelToggle.addEventListener('click', () => {
+    const collapsed = layerPanel.classList.toggle('collapsed');
+    layerPanelToggle.textContent = collapsed ? '+' : '−';
+    layerPanelToggle.title = collapsed ? '패널 펼치기' : '패널 접기';
+  });
 
   $('#toggle-protect-lake').addEventListener('change', (e) => {
     state.protectLakes = e.target.checked;

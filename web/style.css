@@ -222,7 +222,8 @@ input[type="range"] {
   height: 100%;
 }
 
-#map-canvas, #overlay-canvas, #protect-canvas {
+#map-canvas, #overlay-canvas, #protect-canvas,
+#terrain-layer-canvas, #rivers-layer-canvas {
   display: block;
   image-rendering: pixelated;
   image-rendering: -moz-crisp-edges;
@@ -232,13 +233,129 @@ input[type="range"] {
   left: 0;
   transform-origin: 0 0;
 }
+#terrain-layer-canvas, #rivers-layer-canvas {
+  pointer-events: none;
+  /* 기본 숨김. JS가 토글 시 visibility/opacity 갱신 */
+  opacity: 0;
+}
 #protect-canvas {
-  pointer-events: none;   /* 클릭 통과 */
+  pointer-events: none;
 }
 #overlay-canvas {
   pointer-events: none;
-  image-rendering: auto;  /* X 마커는 안티앨리어싱 OK */
+  image-rendering: auto;
 }
+
+/* SVG 마커 레이어 — 캔버스 transform과 무관, 화면 좌표 기준 */
+#marker-svg {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  overflow: visible;
+  z-index: 30;
+}
+#marker-svg .marker-pin {
+  /* 머티리얼 그림자: 떠 있는 느낌 */
+  filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.55));
+}
+#marker-svg .marker-pin .pin-body { stroke: #ffffff; stroke-width: 1.2; }
+#marker-svg .marker-pin .pin-glyph { fill: #ffffff; }
+#marker-svg .marker-pin.kind-xcross .pin-body { fill: #d32f2f; }    /* 빨강 — Material Red 700 */
+#marker-svg .marker-pin.kind-onepx  .pin-body { fill: #f57f17; }    /* 호박 — Material Amber 900 */
+#marker-svg .marker-pin.kind-exclave .pin-body { fill: #ef6c00; }   /* 주황 — Material Orange 800 */
+
+/* 레이어 컨트롤 패널 (우상단 부유) */
+.layer-panel {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  background: rgba(42, 42, 49, 0.92);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0;
+  z-index: 50;
+  font-size: 12px;
+  min-width: 240px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.5);
+  user-select: none;
+}
+.layer-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--fg);
+  cursor: default;
+}
+.layer-panel-toggle {
+  margin-left: auto;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--fg);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  border-radius: 3px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.layer-panel-toggle:hover { background: var(--bg-3); }
+.layer-panel-body {
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.layer-panel.collapsed .layer-panel-body { display: none; }
+.layer-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.layer-row .toggle { flex-shrink: 0; min-width: 110px; }
+.layer-row input[type="range"] { flex: 1; min-width: 60px; width: auto; }
+.layer-row .rgb-text { min-width: 36px; text-align: right; }
+
+/* 검증 패널 (레이어 패널 아래) */
+.check-panel {
+  top: 200px;  /* 레이어 패널 높이만큼 아래 */
+}
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.check-btn {
+  flex: 1;
+  justify-content: flex-start;
+  background: var(--bg-3);
+  height: 30px;
+  padding: 4px 8px;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.check-clear {
+  flex-shrink: 0;
+  height: 30px;
+  min-width: 32px;
+  padding: 4px 8px;
+  font-size: 11px;
+}
+.check-row .badge { margin-left: auto; }
+
+/* 강이 정상이면 녹색, 비정상이면 적색 표시 */
+.badge.ok { background: var(--accent); }
+.badge.warn { background: var(--danger); }
 
 #welcome {
   position: absolute;

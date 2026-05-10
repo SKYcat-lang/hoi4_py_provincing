@@ -46,6 +46,7 @@ def find_map_paths(map_dir: str) -> MapPaths:
         provinces_bmp=os.path.join(map_dir, "provinces.bmp"),
         definition_csv=os.path.join(map_dir, "definition.csv"),
         terrain_bmp=os.path.join(map_dir, "terrain.bmp"),
+        rivers_bmp=os.path.join(map_dir, "rivers.bmp"),
         continent_txt=os.path.join(map_dir, "continent.txt"),
         default_map=os.path.join(map_dir, "default.map"),
         strategicregions_dir=os.path.join(map_dir, "strategicregions"),
@@ -100,6 +101,63 @@ def encode_image_to_png_base64(arr: np.ndarray) -> str:
     img.save(buf, format="PNG", compress_level=1)  # 빠른 압축
     encoded = base64.b64encode(buf.getvalue()).decode("ascii")
     return f"data:image/png;base64,{encoded}"
+
+
+def encode_terrain_layer_png_base64(path: str) -> str | None:
+    """terrain.bmp를 팔레트 적용한 RGB PNG로 인코딩.
+
+    P-mode 그대로 PNG로 저장하면 RGB가 아니라 인덱스 그레이스케일로 보일 수 있어,
+    명시적으로 RGB로 변환해 색이 정확히 살아나도록 한다.
+    """
+    if not os.path.isfile(path):
+        return None
+    try:
+        img = Image.open(path)
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        buf = io.BytesIO()
+        img.save(buf, format="PNG", compress_level=1)
+        return f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode('ascii')}"
+    except Exception:
+        return None
+
+
+def encode_rivers_layer_png_base64(path: str) -> str | None:
+    """rivers.bmp를 RGBA PNG로 인코딩하면서 흰색(땅)/회색(바다)을 완전 투명 처리.
+
+    HOI4 rivers.bmp 팔레트:
+      - (255, 255, 255) 흰색 = 땅 (강 없음)
+      - (122, 122, 122) 회색 = 바다 (강 없음)
+      - 그 외 = 강 (각종 파랑, 강 발원지/하구 마커 등)
+
+    프론트엔드에서 알파 블렌딩으로 자연스럽게 강만 보이도록 한다.
+    """
+    if not os.path.isfile(path):
+        return None
+    try:
+        img = Image.open(path).convert("RGB")
+        rgb = np.array(img, dtype=np.uint8)
+        h, w = rgb.shape[:2]
+
+        # 알파 채널: 흰색/회색은 0(투명), 나머지는 255(불투명)
+        is_land = (
+            (rgb[..., 0] == 255) & (rgb[..., 1] == 255) & (rgb[..., 2] == 255)
+        )
+        is_sea = (
+            (rgb[..., 0] == 122) & (rgb[..., 1] == 122) & (rgb[..., 2] == 122)
+        )
+        alpha = np.where(is_land | is_sea, 0, 255).astype(np.uint8)
+
+        rgba = np.empty((h, w, 4), dtype=np.uint8)
+        rgba[..., 0:3] = rgb
+        rgba[..., 3] = alpha
+
+        out_img = Image.fromarray(rgba, mode="RGBA")
+        buf = io.BytesIO()
+        out_img.save(buf, format="PNG", compress_level=1)
+        return f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode('ascii')}"
+    except Exception:
+        return None
 
 
 def load_definition_csv(path: str) -> list[Province]:

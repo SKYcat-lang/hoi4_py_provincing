@@ -120,24 +120,7 @@
 
     <span class="sep"></span>
 
-    <!-- 공통: X-crossing 진단 -->
-    <div class="tb-group">
-      <button id="btn-xcheck" title="X-crossing 전체 스캔 (2×2 4색 만나는 지점)">
-        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
-          <circle cx="12" cy="12" r="9"/>
-          <path d="M12 8v5M12 16h.01"/>
-        </svg>
-        <span>X 검사</span>
-        <span id="xcount-badge" class="badge" hidden>0</span>
-      </button>
-      <button id="btn-xclear" title="마커 끄기" hidden>
-        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M6 6l12 12M18 6L6 18"/>
-        </svg>
-      </button>
-    </div>
-
-    <span class="sep"></span>
+    <!-- (X-crossing 검사는 우상단 [검증] 패널로 이동됨) -->
 
     <!-- 모드별 정보 표시 (공간은 동일) -->
     <div class="tb-group info-group brush-only">
@@ -176,9 +159,92 @@
   <main id="canvas-area">
     <div id="canvas-wrap">
       <canvas id="map-canvas"></canvas>
+      <canvas id="terrain-layer-canvas"></canvas>
+      <canvas id="rivers-layer-canvas"></canvas>
       <canvas id="protect-canvas"></canvas>
       <canvas id="overlay-canvas"></canvas>
     </div>
+
+    <!-- 줌/팬과 무관한 마커 레이어 (화면 픽셀 기준 크기 고정) -->
+    <svg id="marker-svg" xmlns="http://www.w3.org/2000/svg"></svg>
+
+    <!-- 레이어 컨트롤 패널 (우상단 부유 박스) -->
+    <div id="layer-panel" class="layer-panel">
+      <div class="layer-panel-header" id="layer-panel-header">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 3l9 5-9 5-9-5 9-5z"/>
+          <path d="M3 13l9 5 9-5M3 18l9 5 9-5"/>
+        </svg>
+        <span>레이어</span>
+        <button id="layer-panel-toggle" class="layer-panel-toggle" title="패널 접기">−</button>
+      </div>
+      <div class="layer-panel-body" id="layer-panel-body">
+        <div class="layer-row">
+          <label class="toggle">
+            <input type="checkbox" id="layer-rivers-toggle" />
+            <span>강 (rivers.bmp)</span>
+          </label>
+          <input type="range" id="layer-rivers-opacity" min="0" max="100" step="1" value="60"
+                 title="투명도" />
+          <span id="layer-rivers-opacity-readout" class="rgb-text">60%</span>
+        </div>
+        <div class="layer-row">
+          <label class="toggle">
+            <input type="checkbox" id="layer-terrain-toggle" />
+            <span>지형 (terrain.bmp)</span>
+          </label>
+          <input type="range" id="layer-terrain-opacity" min="0" max="100" step="1" value="50"
+                 title="투명도" />
+          <span id="layer-terrain-opacity-readout" class="rgb-text">50%</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 검증 패널 (레이어 패널 아래) -->
+    <div id="check-panel" class="layer-panel check-panel">
+      <div class="layer-panel-header" id="check-panel-header">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M9 12l2 2 4-4"/>
+          <circle cx="12" cy="12" r="9"/>
+        </svg>
+        <span>검증</span>
+        <button id="check-panel-toggle" class="layer-panel-toggle" title="패널 접기">−</button>
+      </div>
+      <div class="layer-panel-body" id="check-panel-body">
+        <!-- X-crossing 검사 -->
+        <div class="check-row">
+          <button id="btn-check-xcross" class="check-btn" title="2×2에 4색이 만나는 지점">
+            X-crossing 검사
+            <span id="xcount-badge" class="badge" hidden>0</span>
+          </button>
+          <button id="btn-check-xcross-clear" class="check-clear" title="마커 끄기" hidden>×</button>
+        </div>
+        <!-- One-pixel 검사 -->
+        <div class="check-row">
+          <button id="btn-check-onepx" class="check-btn" title="떨어진 1픽셀 외톨이 (connected component 단위)">
+            One-pixel 검사
+            <span id="onepx-badge" class="badge" hidden>0</span>
+          </button>
+          <button id="btn-check-onepx-clear" class="check-clear" title="마커 끄기" hidden>×</button>
+        </div>
+        <!-- 월경지 검사 -->
+        <div class="check-row">
+          <button id="btn-check-exclave" class="check-btn" title="같은 RGB가 분리된 영역 (월경지)">
+            월경지 검사
+            <span id="exclave-badge" class="badge" hidden>0</span>
+          </button>
+        </div>
+        <!-- rivers.bmp 검증 -->
+        <div class="check-row">
+          <button id="btn-check-rivers" class="check-btn" title="rivers.bmp 팔레트 표준 준수">
+            rivers 팔레트
+            <span id="rivers-status-badge" class="badge" hidden>0</span>
+          </button>
+          <button id="btn-fix-rivers" class="check-clear" title="rivers.bmp 팔레트 자동 교정 (백업 생성)" hidden>교정</button>
+        </div>
+      </div>
+    </div>
+
     <div id="welcome">
       <h1>HOI4 Province Painter</h1>
       <p>왼쪽 위 <b>"맵 폴더 열기"</b> 버튼으로 <code>provinces.bmp</code>가 들어 있는 <code>map/</code> 폴더(또는 모드 루트)를 선택하세요.</p>

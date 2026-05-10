@@ -23,6 +23,8 @@ from core.definitions import (
 )
 from core.map_loader import (
     encode_image_to_png_base64,
+    encode_rivers_layer_png_base64,
+    encode_terrain_layer_png_base64,
     find_map_paths,
     load_continent_txt,
     load_definition_csv,
@@ -43,6 +45,12 @@ from core.map_saver import (
 )
 from core.province_analyzer import find_adjacent_colors
 from core.xcrossing import find_all_xcrossings, find_xcrossings_near
+from core.validators import (
+    find_exclaves,
+    find_one_pixel_provinces,
+    fix_rivers_bmp,
+    validate_rivers_bmp,
+)
 from core.split import split_region
 
 
@@ -145,6 +153,12 @@ class Api:
                 lake_rgbs = [list(p.rgb) for p in self.provinces if p.type == "lake"]
                 sea_rgbs = [list(p.rgb) for p in self.provinces if p.type == "sea"]
 
+                # 오버레이 레이어용 PNG 데이터 URL.
+                # rivers: 흰색(땅)/회색(바다) 알파 0 처리 → 강만 보임.
+                # terrain: 팔레트 적용 RGB 변환 → 회색조가 아닌 진짜 색상.
+                rivers_data_url = encode_rivers_layer_png_base64(paths.rivers_bmp)
+                terrain_data_url = encode_terrain_layer_png_base64(paths.terrain_bmp)
+
                 return {
                     "ok": True,
                     "mapDir": paths.map_dir,
@@ -152,6 +166,8 @@ class Api:
                     "width": width,
                     "height": height,
                     "imageDataUrl": encode_image_to_png_base64(self.provinces_arr),
+                    "riversImageDataUrl": rivers_data_url,
+                    "terrainImageDataUrl": terrain_data_url,
                     "provinceCount": len(self.provinces),
                     "lakeRgbs": lake_rgbs,
                     "seaRgbs": sea_rgbs,
@@ -481,6 +497,56 @@ class Api:
             "count": len(coords),
             "truncated": len(coords) >= max_results,
         }
+
+    # -------- One-pixel province 검사 ----------
+
+    def scan_one_pixel_provinces(self, max_results: int = 1000) -> dict:
+        """connected component 단위로 1픽셀짜리 외톨이 모두 검출.
+
+        같은 RGB의 큰 영역과 떨어진 1픽셀 외톨이도 잡는다.
+        """
+        if self.provinces_arr is None:
+            return {"ok": False, "error": "맵이 로드되지 않았습니다."}
+        results = find_one_pixel_provinces(self.provinces_arr, max_results=max_results)
+        return {
+            "ok": True,
+            "coords": [[x, y, list(rgb)] for x, y, rgb in results],
+            "count": len(results),
+            "truncated": len(results) >= max_results,
+        }
+
+    # -------- Exclave (월경지) 검사 ----------
+
+    def scan_exclaves(self, max_pixels: int = 2000) -> dict:
+        """월경지 검출. 같은 RGB가 분리된 2+ 컴포넌트일 때 본체 외 모든 컴포넌트 반환.
+
+        반환: { exclaves: [{rgb, size, pixels: [[x,y],...]}, ...], totalPixelMarkers, count }
+        """
+        if self.provinces_arr is None:
+            return {"ok": False, "error": "맵이 로드되지 않았습니다."}
+        exclaves = find_exclaves(self.provinces_arr, max_results=max_pixels)
+        total = sum(len(e["pixels"]) for e in exclaves)
+        return {
+            "ok": True,
+            "exclaves": exclaves,
+            "count": len(exclaves),
+            "totalPixelMarkers": total,
+            "truncated": total >= max_pixels,
+        }
+
+    # -------- rivers.bmp 검증 + 교정 ----------
+
+    def validate_rivers(self) -> dict:
+        """rivers.bmp 팔레트 표준 준수 검사."""
+        if self.paths is None:
+            return {"ok": False, "error": "맵이 로드되지 않았습니다."}
+        return validate_rivers_bmp(self.paths.rivers_bmp)
+
+    def fix_rivers(self) -> dict:
+        """rivers.bmp를 표준 팔레트로 자동 교정 (백업 포함)."""
+        if self.paths is None:
+            return {"ok": False, "error": "맵이 로드되지 않았습니다."}
+        return fix_rivers_bmp(self.paths.rivers_bmp, backup=True)
 
     def pick_color_at(self, x: int, y: int) -> dict:
         """우클릭 스포이드: 해당 픽셀의 RGB와 (있으면) 프로빈스 정보 반환."""
