@@ -87,8 +87,34 @@ def write_provinces_bmp(arr, path):
 
 
 def write_definition_csv(path, provinces, removed_ids):
-    rows = [p.to_csv_row() for p in sorted(provinces, key=lambda p: p.id)
-            if p.id not in removed_ids]
+    """definition.csv 저장.
+
+    HOI4는 definition.csv의 행 순서가 ID 0,1,2,...,max 순으로 빈틈없이 이어져야
+    한다(엔진이 ID = 행 인덱스로 취급). 따라서 삭제(병합 흡수)나 원본 누락 등으로
+    중간 ID가 비어 있을 경우, 다음 ID를 당겨오면 모든 후속 ID가 어긋나 외부 파일
+    참조가 모두 깨진다. 대신 그 슬롯을 placeholder 행으로 채워 ID 순서를 보존한다.
+
+    Placeholder 형식: `id;0;0;0;land;false;unknown;0`
+      - RGB (0,0,0)는 invalid slot으로 어떤 픽셀도 가리키지 않음
+      - terrain "unknown" / continent 0 은 안전한 무의미 값
+    """
+    kept = {p.id: p for p in provinces if p.id not in removed_ids}
+    if not kept:
+        # 비어있는 경우 그대로 빈 파일 작성 (이론상 발생하지 않음).
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            f.write("")
+        return
+
+    max_id = max(kept.keys())
+    rows: list[str] = []
+    # ID 0은 HOI4의 invalid slot. 존재하지 않으면 placeholder로 채워둔다.
+    for i in range(0, max_id + 1):
+        p = kept.get(i)
+        if p is not None:
+            rows.append(p.to_csv_row())
+        else:
+            rows.append(f"{i};0;0;0;land;false;unknown;0")
+
     with open(path, "w", encoding="utf-8", newline="") as f:
         f.write("\r\n".join(rows))
         f.write("\r\n")

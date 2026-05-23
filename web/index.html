@@ -60,6 +60,14 @@
         </svg>
         <span>자동 분할</span>
       </button>
+      <button id="tab-adjacency" class="tab-btn" title="인접 연결 (4) — adjacencies.csv 편집">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="5" cy="12" r="2.5"/>
+          <circle cx="19" cy="12" r="2.5"/>
+          <path d="M7.5 12 H 16.5" stroke-dasharray="2 2"/>
+        </svg>
+        <span>인접 연결</span>
+      </button>
     </div>
 
     <span class="sep"></span>
@@ -167,6 +175,8 @@
 
     <!-- 줌/팬과 무관한 마커 레이어 (화면 픽셀 기준 크기 고정) -->
     <svg id="marker-svg" xmlns="http://www.w3.org/2000/svg"></svg>
+    <!-- 인접 연결 모드 임시 마커/선 레이어 -->
+    <svg id="adj-svg" xmlns="http://www.w3.org/2000/svg"></svg>
 
     <!-- 레이어 컨트롤 패널 (우상단 부유 박스) -->
     <div id="layer-panel" class="layer-panel">
@@ -245,6 +255,28 @@
       </div>
     </div>
 
+    <!-- 기능 패널 (검증 패널 아래) -->
+    <div id="tool-panel" class="layer-panel tool-panel">
+      <div class="layer-panel-header" id="tool-panel-header">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M14.7 6.3a4 4 0 015.6 5.6l-1.4 1.4-5.6-5.6 1.4-1.4z"/>
+          <path d="M13.3 7.7L4 17v3h3l9.3-9.3"/>
+        </svg>
+        <span>기능</span>
+        <button id="tool-panel-toggle" class="layer-panel-toggle" title="패널 접기">−</button>
+      </div>
+      <div class="layer-panel-body" id="tool-panel-body">
+        <!-- 최소침습 ID 병합 -->
+        <div class="check-row">
+          <button id="btn-compact-scan" class="check-btn"
+                  title="definition.csv의 placeholder(빈 프로빈스)를 찾고 맨 뒷번호를 끌어와 빈자리를 채우는 매핑을 미리보기.">
+            ID 갭 병합 (감독자)
+            <span id="compact-status-badge" class="badge" hidden>0</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
     <div id="welcome">
       <h1>HOI4 Province Painter</h1>
       <p>왼쪽 위 <b>"맵 폴더 열기"</b> 버튼으로 <code>provinces.bmp</code>가 들어 있는 <code>map/</code> 폴더(또는 모드 루트)를 선택하세요.</p>
@@ -260,12 +292,97 @@
         <li><b>휠</b>: 줌 (커서 기준)</li>
         <li><b>Ctrl+Z / Ctrl+Y</b>: 실행취소 / 다시실행 (브러시 모드)</li>
         <li><b>Ctrl+S</b>: 저장 (definition.csv, state, strategic regions 자동 갱신)</li>
+        <li><b>Delete</b>: 커서 위치 프로빈스를 인접 프로빈스로 흡수(=삭제). 19000개 한도 관리용.</li>
+        <li><b>[인접 연결] 좌클릭 × 2</b>: 두 프로빈스를 잇는 adjacency를 추가 (해협/운하/임패서블).</li>
       </ul>
+    </div>
+
+    <!-- 인접 연결 모드: 하단 도킹 입력바 (채팅창 풍) -->
+    <div id="adjacency-bar" class="adjacency-bar hidden" aria-hidden="true">
+      <div class="adj-bar-pill">
+        <span class="adj-step" id="adj-step-1" data-step="1" title="From 프로빈스 (캔버스 클릭)">
+          <span class="adj-step-no">1</span>
+          <span class="adj-step-label">From</span>
+          <span class="adj-step-value" id="adj-from-display">-</span>
+        </span>
+        <span class="adj-arrow">→</span>
+        <span class="adj-step" id="adj-step-2" data-step="2" title="To 프로빈스 (캔버스 클릭)">
+          <span class="adj-step-no">2</span>
+          <span class="adj-step-label">To</span>
+          <span class="adj-step-value" id="adj-to-display">-</span>
+        </span>
+
+        <span class="adj-sep"></span>
+
+        <label class="adj-field"
+               title="인접의 종류.&#10;• (strait/canal): 빈값. 해협/운하 — 보통 rule과 짝지어 사용.&#10;• sea: 두 land 프로빈스 사이의 바다 건너기. through에 바다 프로빈스 ID.&#10;• impassable: 인접 불가 (산맥 등으로 통행 차단).&#10;• river: 강을 사이에 둔 인접 (이동 페널티).">
+          <span class="adj-field-label tipped">Type</span>
+          <select id="adj-type">
+            <option value="">(strait/canal)</option>
+            <option value="sea">sea</option>
+            <option value="impassable">impassable</option>
+            <option value="river">river</option>
+          </select>
+        </label>
+
+        <label class="adj-field"
+               title="경유 프로빈스 ID.&#10;• sea 타입: 두 land 사이를 잇는 바다 프로빈스 ID.&#10;• strait/canal: rule의 required_provinces 와 협력해 통제권 판정에 쓰임.&#10;• 미지정: -1.&#10;• From/To가 채워지면 사이의 바다/호수 프로빈스가 자동 추론됩니다. 옆의 ↻ 버튼으로 재계산.">
+          <span class="adj-field-label tipped">Through</span>
+          <span class="adj-through-wrap">
+            <input id="adj-through" type="number" value="-1" step="1" />
+            <button id="adj-through-refresh" class="adj-through-refresh" type="button"
+                    title="From/To 사이의 바다/호수 프로빈스를 다시 자동 추론" disabled>↻</button>
+          </span>
+        </label>
+
+        <label class="adj-field adj-field-rule"
+               title="map/adjacency_rules.txt 에 정의된 통행 규칙.&#10;예: SUEZ_CANAL, KIEL_CANAL, GIBRALTAR_STRAIT.&#10;선택 시 enemy/friend/neutral 별 통행 허용/차단이 그 rule을 따른다.&#10;새 rule을 만들려면 모드의 adjacency_rules.txt 를 직접 편집.">
+          <span class="adj-field-label tipped">Rule</span>
+          <select id="adj-rule">
+            <option value="">(없음)</option>
+          </select>
+        </label>
+
+        <label class="adj-field adj-field-comment" title="메모. ; 는 자동 제거됨">
+          <span class="adj-field-label">Comment</span>
+          <input id="adj-comment" type="text" placeholder="(선택) 예: Panama" autocomplete="off" />
+        </label>
+
+        <button id="adj-add-btn" class="adj-add-btn primary" disabled title="두 프로빈스를 선택하면 활성화됩니다">
+          <svg viewBox="0 0 24 24" aria-hidden="true" width="16" height="16"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
+          추가
+        </button>
+        <button id="adj-save-btn" class="adj-add-btn primary" hidden title="변경사항 저장">
+          <svg viewBox="0 0 24 24" aria-hidden="true" width="16" height="16"><path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2zM17 21v-8H7v8M7 3v5h8"/></svg>
+          저장
+        </button>
+        <button id="adj-delete-btn" class="adj-delete-btn" hidden title="이 인접 항목 삭제">
+          <svg viewBox="0 0 24 24" aria-hidden="true" width="16" height="16"><path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/></svg>
+          삭제
+        </button>
+        <button id="adj-clear-btn" class="adj-clear-btn" title="선택 초기화">↺</button>
+      </div>
+      <div id="adj-hint" class="adj-hint">캔버스에서 첫 프로빈스를 클릭하세요.</div>
+    </div>
+
+    <!-- 인접 목록 사이드 패널 -->
+    <div id="adjacency-list-panel" class="adjacency-list-panel hidden">
+      <div class="adj-list-header">
+        <span>인접 목록</span>
+        <span id="adj-list-count" class="prov-count">0개</span>
+        <button id="adj-list-close" class="layer-panel-toggle" title="닫기">×</button>
+      </div>
+      <div id="adj-list-body" class="adj-list-body"></div>
     </div>
   </main>
 
   <footer id="bottombar">
-    <span id="cursor-info">-</span>
+    <span class="bb-left">
+      <span id="cursor-info">-</span>
+      <span id="province-count-label" class="prov-count" title="현재 BMP에 살아있는 프로빈스 수 (저장 후 게임에 반영되는 수). 19000 초과 시 노랑, 20000 초과 시 빨강.">
+        프로빈스 수: <span id="province-count-value">-</span>
+      </span>
+    </span>
     <span id="zoom-info">100%</span>
   </footer>
 
@@ -287,6 +404,42 @@
       <div class="dialog-buttons">
         <button id="btn-save-cancel">취소</button>
         <button id="btn-save-confirm" class="primary">저장 실행</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 최소침습 ID 병합 감독자 다이얼로그 -->
+  <div id="compact-dialog" class="dialog hidden">
+    <div class="dialog-inner compact-dialog-inner">
+      <h2>ID 갭 병합 (감독자 모드)</h2>
+      <p class="compact-desc">
+        <b>맨 뒷번호 → 빈자리</b> 방식으로 최소침습 병합합니다. 매핑된 ID들이 외부 파일에 등장하는 위치를 모두 보여드리니
+        <b>각 매치마다 Yes/No를 직접 확인</b>하세요. 자동 처리는 위험하므로 사용자 승인이 필수입니다.
+      </p>
+
+      <div id="compact-summary" class="compact-summary"></div>
+
+      <div class="compact-body">
+        <!-- 왼쪽: 매핑 미리보기 -->
+        <div class="compact-section">
+          <h3>매핑 미리보기 (옛 ID → 새 ID)</h3>
+          <div id="compact-map-scroll" class="compact-map-scroll"></div>
+        </div>
+
+        <!-- 오른쪽: 매치 목록 -->
+        <div class="compact-section">
+          <div class="compact-section-header">
+            <h3>외부 파일 매치 목록</h3>
+            <span id="compact-yes-count" class="prov-count">선택: 0 / 0</span>
+          </div>
+          <div id="compact-matches-wrap" class="compact-matches-wrap"></div>
+        </div>
+      </div>
+
+      <div class="dialog-buttons">
+        <button id="btn-compact-cancel">취소</button>
+        <button id="btn-compact-dry-run" title="실제 파일 변경 없이 어떤 일이 일어날지 미리보기">드라이런</button>
+        <button id="btn-compact-execute" class="primary" title="선택한 Yes 매치만 실제로 치환 + definition.csv 재작성 (백업 없음, 되돌릴 수 없음)">실행</button>
       </div>
     </div>
   </div>

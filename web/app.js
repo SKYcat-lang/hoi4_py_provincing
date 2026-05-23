@@ -228,11 +228,13 @@ function setTool(name) {
 
 // ---------- 탭/모드 전환 ----------
 function setMode(name) {
-  if (name !== 'province' && name !== 'state' && name !== 'split') return;
+  if (name !== 'province' && name !== 'state' && name !== 'split' && name !== 'adjacency') return;
   state.mode = name;
   $('#tab-province').classList.toggle('active', name === 'province');
   $('#tab-state').classList.toggle('active', name === 'state');
   $('#tab-split').classList.toggle('active', name === 'split');
+  const tabAdj = $('#tab-adjacency');
+  if (tabAdj) tabAdj.classList.toggle('active', name === 'adjacency');
 
   // 모드별 UI 가시성 (hidden 속성으로 통일)
   document.querySelectorAll('.brush-only').forEach(el => {
@@ -245,6 +247,25 @@ function setMode(name) {
     el.hidden = (name !== 'split');
   });
 
+  // 인접 모드: 하단 입력바 + 목록 패널 노출/숨김
+  const adjBar = document.getElementById('adjacency-bar');
+  const adjListPanel = document.getElementById('adjacency-list-panel');
+  if (adjBar) {
+    adjBar.classList.toggle('hidden', name !== 'adjacency');
+    adjBar.setAttribute('aria-hidden', name !== 'adjacency' ? 'true' : 'false');
+  }
+  if (adjListPanel) {
+    adjListPanel.classList.toggle('hidden', name !== 'adjacency');
+  }
+  // 인접 모드 진입 시 영구 선/목록 자동 로드
+  if (name === 'adjacency' && window.AdjMode && typeof window.AdjMode.enter === 'function') {
+    window.AdjMode.enter();
+  }
+  // 인접 모드 이탈 시 임시 마커/선 + 오버레이 정리
+  if (name !== 'adjacency' && window.AdjMode && typeof window.AdjMode.cancel === 'function') {
+    window.AdjMode.cancel();
+  }
+
   if (state.loaded) {
     if (name === 'state') {
       ensureStateImageData();
@@ -255,12 +276,15 @@ function setMode(name) {
       // 분할 모드는 프로빈스 BMP를 그대로 보여줌 (편집은 브러시 안 함)
       ctx.putImageData(state.imageData, 0, 0);
       canvas.style.cursor = 'crosshair';
+    } else if (name === 'adjacency') {
+      ctx.putImageData(state.imageData, 0, 0);
+      canvas.style.cursor = 'crosshair';
     } else {
       ctx.putImageData(state.imageData, 0, 0);
       canvas.style.cursor = state.tool === 'fill' ? 'cell' : 'crosshair';
     }
   }
-  const labels = { province: '프로빈스 편집', state: '스테이트 할당', split: '자동 분할' };
+  const labels = { province: '프로빈스 편집', state: '스테이트 할당', split: '자동 분할', adjacency: '인접 연결' };
   setStatus(`모드: ${labels[name]}`);
 }
 
@@ -346,6 +370,11 @@ function renderMarkers() {
   }
 
   markerSvg.innerHTML = parts.join('');
+
+  // 인접 모드 마커도 같이 동기화 (zoom/pan 변경 시)
+  if (window.AdjMode && typeof window.AdjMode.render === 'function') {
+    window.AdjMode.render();
+  }
 }
 
 // 호환성: 기존 호출처가 drawXcrossingOverlay 사용 중이면 SVG 렌더로 위임
@@ -885,6 +914,13 @@ function onMouseDown(e) {
       setStatus(`분할 대상 선택: (${x}, ${y}) RGB(${r}, ${g}, ${b}) — '분할' 버튼을 누르세요`);
       return;
     }
+    // 인접 연결 모드: 두 번 클릭으로 From/To 선택
+    if (state.mode === 'adjacency') {
+      if (window.AdjMode && typeof window.AdjMode.handleClick === 'function') {
+        window.AdjMode.handleClick(x, y);
+      }
+      return;
+    }
 
     // 프로빈스 편집 모드: 도구 분기
     const useFill = e.shiftKey || state.tool === 'fill';
@@ -933,8 +969,9 @@ function onMouseMove(e) {
     return;
   }
 
-  // 커서 정보
+  // 커서 정보 + Delete 키 동작용 좌표 추적
   const [px, py] = screenToPixel(e.clientX, e.clientY);
+  state.lastCursorXY = [px, py];
   if (px >= 0 && py >= 0 && px < state.width && py < state.height) {
     const [r, g, b] = getPixel(px, py);
     $('#cursor-info').textContent = `(${px}, ${py})  RGB(${r}, ${g}, ${b})`;
@@ -992,7 +1029,14 @@ async function onMouseUp(e) {
   } else if (e.button === 2 && state.rightDown) {
     state.rightDown = false;
     if (!state.rightDragMoved) {
-      // 짧은 우클릭 → 스포이드
+      // 인접 모드: 짧은 우클릭 = 선택 취소
+      if (state.mode === 'adjacency') {
+        if (window.AdjMode && typeof window.AdjMode.cancel === 'function') {
+          window.AdjMode.cancel();
+        }
+        return;
+      }
+      // 짧은 우클릭 → 스포이드 (다른 모드)
       const [x, y] = screenToPixel(e.clientX, e.clientY);
       const result = await window.pywebview.api.pick_color_at(x, y);
       if (result && result.ok) {
@@ -1061,7 +1105,90 @@ function onKeyDown(e) {
     } else if (k === 'g' && state.mode === 'province') {
       e.preventDefault();
       setTool('fill');
+    } else if (e.key === 'Delete') {
+      // 커서 위치 프로빈스를 인접 흡수(=삭제). 19000개 한도 관리용.
+      e.preventDefault();
+      deleteProvinceUnderCursor();
     }
+  }
+}
+
+// 커서 위치를 항상 추적해 두면 Delete 키 동작이 자연스럽다.
+state.lastCursorXY = null;
+
+async function deleteProvinceUnderCursor() {
+  if (!state.loaded) return;
+  const xy = state.lastCursorXY;
+  if (!xy) {
+    setStatus('마우스 커서를 맵 위에 둔 상태에서 Delete 키를 눌러주세요.');
+    return;
+  }
+  const [x, y] = xy;
+  if (x < 0 || y < 0 || x >= state.width || y >= state.height) {
+    return;
+  }
+  setStatus('인접 프로빈스로 흡수 중...');
+  let r;
+  try {
+    r = await window.pywebview.api.delete_province_at(
+      x, y, state.protectLakes, state.protectSea,
+    );
+  } catch (err) {
+    console.error('delete_province_at failed', err);
+    setStatus('삭제 호출 실패');
+    return;
+  }
+  if (!r || !r.ok) {
+    setStatus(`삭제 실패: ${r ? r.error : 'unknown'}`);
+    return;
+  }
+  const changes = r.changedPixels || [];
+  if (changes.length === 0) {
+    setStatus(r.message || '변경된 픽셀이 없습니다.');
+    return;
+  }
+  // 프론트 ImageData에 적용
+  for (const c of changes) {
+    setPixelRaw(c[0], c[1], c[5], c[6], c[7]);
+  }
+  flushCanvas();
+  // Undo 스택 등록 (changes = [x,y,oR,oG,oB,nR,nG,nB] → 표준 5-튜플로 압축)
+  state.undoStack.push({
+    changes: changes.map(c => [c[0], c[1], c[2], c[3], c[4]]),
+  });
+  state.redoStack = [];
+  updateUndoButtons();
+  // 국소 X-crossing 검사 (경계가 바뀌었으니)
+  scanXcrossingsNear(changes.map(c => [c[0], c[1]]));
+  // 카운터 갱신
+  refreshProvinceCount();
+  const into = r.absorbedIntoProvinceId ?? '미배정';
+  setStatus(`프로빈스 ID ${r.deletedProvinceId ?? '?'} → ID ${into}에 흡수됨 (${r.pixelCount}px)`);
+}
+
+// ---------- 프로빈스 수 카운터 ----------
+async function refreshProvinceCount() {
+  if (!state.loaded) return;
+  try {
+    const r = await window.pywebview.api.get_live_province_count();
+    if (r && r.ok) {
+      updateProvinceCountLabel(r.liveCount);
+    }
+  } catch (err) {
+    console.warn('province count refresh failed', err);
+  }
+}
+
+function updateProvinceCountLabel(count) {
+  const valEl = $('#province-count-value');
+  const wrapEl = $('#province-count-label');
+  if (!valEl || !wrapEl) return;
+  valEl.textContent = String(count);
+  wrapEl.classList.remove('warn', 'danger');
+  if (count > 20000) {
+    wrapEl.classList.add('danger');
+  } else if (count > 19000) {
+    wrapEl.classList.add('warn');
   }
 }
 
@@ -1220,6 +1347,9 @@ async function applyLoadedMap(result) {
   updateSelectedStateLabel();
 
   setStatus(`로드 완료: ${result.provinceCount}개 프로빈스 / ${result.width}×${result.height} / 스테이트 ${state.states.length}개`);
+  // 카운터 초기 표시
+  updateProvinceCountLabel(result.provinceCount);
+  refreshProvinceCount();  // 더 정확한 라이브 카운트로 덮어쓰기
 }
 
 // ---------- 자동 분할 ----------
@@ -1432,8 +1562,13 @@ async function onSaveConfirm() {
   const r = await window.pywebview.api.commit_save(typeOverrides, stateAssignments);
   $('#save-dialog').classList.add('hidden');
   if (r && r.ok) {
-    let msg = `저장 완료: 새 ${r.newProvinceCount}개 / 삭제 ${r.removedProvinceCount}개 / state ${r.modifiedStateFiles.length}개 / region ${r.modifiedRegionFiles.length}개`;
+    const extraExt = (r.modifiedExternalFiles && r.modifiedExternalFiles.length) || 0;
+    let msg = `저장 완료: 새 ${r.newProvinceCount}개 / 삭제 ${r.removedProvinceCount}개 / state ${r.modifiedStateFiles.length} / region ${r.modifiedRegionFiles.length} / 외부 파일 ${extraExt}`;
     setStatus(msg);
+    // 카운터 갱신 (백엔드가 정확한 라이브 카운트를 반환)
+    if (typeof r.liveProvinceCount === 'number') {
+      updateProvinceCountLabel(r.liveProvinceCount);
+    }
     // 보호 색상/룩업/할당 갱신
     for (const p of state.newProvincesPreview) {
       const rgbStr = p.rgb.join(',');
@@ -1493,6 +1628,8 @@ window.addEventListener('pywebviewready', () => {
   $('#tab-province').addEventListener('click', () => setMode('province'));
   $('#tab-state').addEventListener('click', () => setMode('state'));
   $('#tab-split').addEventListener('click', () => setMode('split'));
+  const tabAdjEl = document.getElementById('tab-adjacency');
+  if (tabAdjEl) tabAdjEl.addEventListener('click', () => setMode('adjacency'));
   $('#btn-split-run').addEventListener('click', runAutoSplit);
   const noiseSlider = $('#split-noise-input');
   const noiseReadout = $('#split-noise-readout');
@@ -1519,6 +1656,17 @@ window.addEventListener('pywebviewready', () => {
       const collapsed = checkPanel.classList.toggle('collapsed');
       checkPanelToggle.textContent = collapsed ? '+' : '−';
       checkPanelToggle.title = collapsed ? '패널 펼치기' : '패널 접기';
+    });
+  }
+
+  // 기능 패널 접기/펼치기
+  const toolPanel = $('#tool-panel');
+  const toolPanelToggle = $('#tool-panel-toggle');
+  if (toolPanelToggle) {
+    toolPanelToggle.addEventListener('click', () => {
+      const collapsed = toolPanel.classList.toggle('collapsed');
+      toolPanelToggle.textContent = collapsed ? '+' : '−';
+      toolPanelToggle.title = collapsed ? '패널 펼치기' : '패널 접기';
     });
   }
 
@@ -1577,3 +1725,992 @@ window.addEventListener('pywebviewready', () => {
   updateCurrentColorLabel();
   updateUndoButtons();
 });
+
+// =====================================================================
+// 최소침습 ID 병합 (감독자 모드)
+// =====================================================================
+// 흐름:
+//   1) "ID 갭 병합" 버튼 → scan_placeholder_ids() → 매핑 미리보기
+//   2) 매핑된 ID들로 search_id_usages() → 외부 파일 매치 리스트
+//   3) 사용자가 각 매치별 Yes/No 결정 (기본 Yes)
+//   4) "드라이런" 또는 "실행" 클릭 → apply_min_invasive_compaction()
+//
+// 자동화 금지 원칙: 매치별 결정은 반드시 사용자 손을 거친다.
+(function setupCompactSupervisor() {
+  document.addEventListener('DOMContentLoaded', () => {
+    const $ = (sel) => document.querySelector(sel);
+    const scanBtn = $('#btn-compact-scan');
+    const dialog = $('#compact-dialog');
+    const cancelBtn = $('#btn-compact-cancel');
+    const dryRunBtn = $('#btn-compact-dry-run');
+    const executeBtn = $('#btn-compact-execute');
+    const yesCountLabel = $('#compact-yes-count');
+    if (!scanBtn) return;  // 패널이 없으면 작동 안 함 (방어)
+
+    // 현재 다이얼로그가 들고 있는 상태
+    let currentPlan = null;       // { idMap, changedIdMap, removedIds, ... }
+    let currentMatches = [];      // [{filePath, relPath, lineNo, lineText, matchedId, colStart, colEnd}, ...]
+    let decisions = [];           // matches와 같은 길이의 Boolean (true=Yes)
+
+    function showDialog() { dialog.classList.remove('hidden'); }
+    function hideDialog() { dialog.classList.add('hidden'); }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, c => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;',
+        '"': '&quot;', "'": '&#39;',
+      }[c]));
+    }
+
+    function updateYesCount() {
+      const yes = decisions.filter(Boolean).length;
+      yesCountLabel.textContent = `선택: ${yes} / ${decisions.length}`;
+    }
+
+    function renderMapTable(plan) {
+      const wrap = $('#compact-map-scroll');
+      const changed = plan.changedIdMap || {};
+      const keys = Object.keys(changed).map(k => parseInt(k, 10)).sort((a, b) => a - b);
+      if (keys.length === 0) {
+        wrap.innerHTML = '<p style="color: var(--muted); font-size: 12px; padding: 12px;">매핑할 ID가 없습니다 (placeholder만 잘려나갑니다).</p>';
+        return;
+      }
+      const rows = keys.map(oldId => {
+        const newId = changed[oldId];
+        return `<tr><td>${oldId}</td><td style="color: var(--muted);">→</td><td><b style="color: var(--accent);">${newId}</b></td></tr>`;
+      }).join('');
+      wrap.innerHTML = `
+        <table class="compact-map-table">
+          <thead><tr><th>옛 ID</th><th></th><th>새 ID</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>`;
+    }
+
+    function renderMatches() {
+      const wrap = $('#compact-matches-wrap');
+      if (!currentMatches.length) {
+        wrap.innerHTML = '<p style="padding:12px; color: var(--muted); font-size:12px;">외부 파일에서 매칭된 ID가 없습니다. 그대로 실행해도 안전합니다.</p>';
+        updateYesCount();
+        return;
+      }
+      // 파일별로 그룹화 (백엔드가 이미 정렬해서 줌). 각 파일별로 인덱스 목록도 같이 저장.
+      const changed = currentPlan?.changedIdMap || {};
+      const groups = [];  // [{relPath, indices: [globalIdx, ...]}]
+      let cur = null;
+      currentMatches.forEach((m, idx) => {
+        if (!cur || cur.relPath !== m.relPath) {
+          cur = { relPath: m.relPath, indices: [] };
+          groups.push(cur);
+        }
+        cur.indices.push(idx);
+      });
+
+      const html = [];
+      groups.forEach((g) => {
+        const total = g.indices.length;
+        const yesInFile = g.indices.filter(i => decisions[i]).length;
+        const allYes = yesInFile === total;
+        const allNo = yesInFile === 0;
+        html.push(`<div class="compact-file-group">`);
+        html.push(`
+          <div class="compact-match-file">
+            <span>📄</span>
+            <span class="file-name" title="${escapeHtml(g.relPath)}">${escapeHtml(g.relPath)}</span>
+            <span class="file-count">${yesInFile} / ${total}</span>
+            <span class="file-bulk">
+              <button class="${allYes ? 'active yes' : ''}" data-file-action="yes" data-file="${escapeHtml(g.relPath)}">파일 Yes</button>
+              <button class="${allNo ? 'active no' : ''}" data-file-action="no" data-file="${escapeHtml(g.relPath)}">파일 No</button>
+            </span>
+          </div>`);
+        g.indices.forEach((idx) => {
+          const m = currentMatches[idx];
+          const before = m.lineText.slice(0, m.colStart);
+          const hit = m.lineText.slice(m.colStart, m.colEnd);
+          const after = m.lineText.slice(m.colEnd);
+          const newId = changed[m.matchedId] ?? '?';
+          const yes = decisions[idx];
+          html.push(`
+            <div class="compact-match-row${yes ? '' : ' no'}" data-idx="${idx}">
+              <span class="compact-match-line-no">L${m.lineNo}</span>
+              <span class="compact-match-text">${escapeHtml(before)}<span class="hit">${escapeHtml(hit)}</span>${escapeHtml(after)}</span>
+              <span class="compact-match-arrow">→</span>
+              <span class="compact-match-new-id">${newId}</span>
+              <span class="compact-match-decision">
+                <button class="${yes ? 'active yes' : ''}" data-action="yes" data-idx="${idx}">Yes</button>
+                <button class="${yes ? '' : 'active no'}" data-action="no" data-idx="${idx}">No</button>
+              </span>
+            </div>`);
+        });
+        html.push(`</div>`);
+      });
+      wrap.innerHTML = html.join('');
+
+      // 이벤트 위임: (1) 개별 매치 Yes/No, (2) 파일 단위 Yes/No
+      wrap.onclick = (e) => {
+        const fileBtn = e.target.closest('button[data-file-action]');
+        if (fileBtn) {
+          const filePath = fileBtn.dataset.file;
+          const setYes = (fileBtn.dataset.fileAction === 'yes');
+          currentMatches.forEach((m, idx) => {
+            if (m.relPath === filePath) decisions[idx] = setYes;
+          });
+          renderMatches();
+          return;
+        }
+        const btn = e.target.closest('button[data-action]');
+        if (!btn) return;
+        const idx = parseInt(btn.dataset.idx, 10);
+        if (Number.isNaN(idx)) return;
+        decisions[idx] = (btn.dataset.action === 'yes');
+        renderMatches();
+      };
+      updateYesCount();
+    }
+
+    function renderSummary() {
+      const sum = $('#compact-summary');
+      if (!currentPlan) { sum.textContent = ''; return; }
+      const changedCount = Object.keys(currentPlan.changedIdMap || {}).length;
+      const removedCount = (currentPlan.removedIds || []).length;
+      const newCount = currentPlan.newProvinceCount || 0;
+      sum.innerHTML = `
+        <b>매핑:</b> ${changedCount}개 ID 이동 ·
+        <b>제거:</b> ${removedCount}개 ID 슬롯 사라짐 ·
+        <b>최종 프로빈스 수:</b> ${newCount} ·
+        <b>외부 파일 매치:</b> ${currentMatches.length}개
+      `;
+    }
+
+    async function runScan() {
+      scanBtn.disabled = true;
+      try {
+        const planRes = await window.pywebview.api.scan_placeholder_ids();
+        if (!planRes.ok) {
+          alert('계획 산출 실패: ' + (planRes.error || 'unknown'));
+          return;
+        }
+        currentPlan = planRes.plan;
+        const movePairs = planRes.movePairs || [];
+        const idsToSearch = movePairs.map(p => p[0]);  // 옛 ID들
+
+        if (idsToSearch.length === 0) {
+          currentMatches = [];
+          decisions = [];
+        } else {
+          const searchRes = await window.pywebview.api.search_id_usages(idsToSearch);
+          if (!searchRes.ok) {
+            alert('검색 실패: ' + (searchRes.error || 'unknown'));
+            return;
+          }
+          currentMatches = searchRes.matches || [];
+          decisions = currentMatches.map(() => true);  // 기본 모두 Yes
+        }
+
+        renderSummary();
+        renderMapTable(currentPlan);
+        renderMatches();
+        showDialog();
+      } catch (e) {
+        alert('스캔 중 예외: ' + e.message);
+      } finally {
+        scanBtn.disabled = false;
+      }
+    }
+
+    async function runApply(dryRun) {
+      const approved = currentMatches.filter((_, i) => decisions[i]);
+      const btn = dryRun ? dryRunBtn : executeBtn;
+      const origText = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = dryRun ? '드라이런 중…' : '실행 중…';
+      try {
+        const res = await window.pywebview.api.apply_min_invasive_compaction(
+          approved, dryRun,
+        );
+        if (!res.ok) {
+          alert((dryRun ? '드라이런' : '실행') + ' 실패: ' + (res.error || 'unknown'));
+          return;
+        }
+        const rep = res.report || {};
+        const msg = [
+          dryRun ? '✓ 드라이런 완료 (실제 파일은 변경되지 않았습니다)' : '✓ 실행 완료',
+          `치환 적용된 위치: ${rep.totalReplacements || 0}`,
+          `수정된 파일 수: ${(rep.modifiedFiles || []).length}`,
+          `스킵된 파일 수: ${(rep.skippedFiles || []).length}`,
+          `매핑 안 된 매치(unmapped): ${(rep.unmappedMatches || []).length}`,
+        ].join('\n');
+        alert(msg);
+        if (!dryRun) {
+          hideDialog();
+          // 저장 후 메모리 상태도 최신으로. 간단히 페이지 reload는 너무 강하니
+          // 사용자에게 안내만.
+          // (실제 메모리 동기화는 self.provinces가 백엔드에서 갱신됨)
+        }
+      } catch (e) {
+        alert((dryRun ? '드라이런' : '실행') + ' 중 예외: ' + e.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = origText;
+      }
+    }
+
+    scanBtn.addEventListener('click', runScan);
+    cancelBtn.addEventListener('click', hideDialog);
+    dryRunBtn.addEventListener('click', () => runApply(true));
+    executeBtn.addEventListener('click', () => {
+      if (!confirm('실제 파일 변경을 적용합니다. 백업은 생성되지 않으며 되돌릴 수 없습니다. 계속할까요?')) return;
+      runApply(false);
+    });
+  });
+})();
+
+// =====================================================================
+// 인접 연결 모드 (adjacency)
+// =====================================================================
+// 사용 흐름:
+//   1) 4번 탭 클릭 → state.mode = 'adjacency', 하단 입력바 노출
+//   2) 캔버스 클릭 1회 → From 프로빈스 ID 채움, 마커 표시
+//   3) 캔버스 클릭 2회 → To 프로빈스 ID 채움, From-To 잇는 점선 표시
+//   4) 입력바에서 Type/Through/Rule/Comment 입력
+//   5) [추가] 버튼 → api.add_adjacency 호출 → 성공 시 입력바 초기화 후 다시 1번
+//
+// 모드 이탈 또는 [↺] 버튼 시 마커/선/입력 모두 리셋.
+window.AdjMode = (function () {
+  const RULE_RE = /^[A-Z][A-Z0-9_]*$/;
+
+  // 내부 상태
+  let fromId = null;    // 첫 클릭 프로빈스 ID
+  let toId = null;      // 두번째 클릭 프로빈스 ID
+  let fromXY = null;    // 캔버스 이미지 좌표 (x, y)
+  let toXY = null;
+
+  // DOM 캐시 (lazy)
+  let svg, hint, fromEl, toEl, fromDisplay, toDisplay;
+  let typeSel, throughInput, throughRefreshBtn, ruleInput, ruleValidity, commentInput;
+  let addBtn, saveBtn, deleteBtn, clearBtn, listPanel, listBody, listCount, listClose;
+
+  // 데이터 캐시
+  let centroidsById = null;            // {pid: [cx, cy]}
+  let allAdjacencies = [];             // [{fromId, toId, type, through, ruleName, comment, index}]
+  let fromRgb = null;                  // 현재 선택된 From 프로빈스의 RGB [r,g,b]
+  let toRgb = null;
+  // 편집 상태: null=신규 입력, int=해당 인덱스의 항목을 편집 중
+  let editingIndex = null;
+  // Through 사용자 수동 편집 여부. true면 자동 채움이 일어나지 않음.
+  let throughManuallyEdited = false;
+
+  function cache() {
+    if (svg) return;
+    svg = document.getElementById('adj-svg');
+    hint = document.getElementById('adj-hint');
+    fromEl = document.getElementById('adj-step-1');
+    toEl = document.getElementById('adj-step-2');
+    fromDisplay = document.getElementById('adj-from-display');
+    toDisplay = document.getElementById('adj-to-display');
+    typeSel = document.getElementById('adj-type');
+    throughInput = document.getElementById('adj-through');
+    throughRefreshBtn = document.getElementById('adj-through-refresh');
+    ruleInput = document.getElementById('adj-rule');
+    ruleValidity = document.getElementById('adj-rule-validity');
+    commentInput = document.getElementById('adj-comment');
+    addBtn = document.getElementById('adj-add-btn');
+    saveBtn = document.getElementById('adj-save-btn');
+    deleteBtn = document.getElementById('adj-delete-btn');
+    clearBtn = document.getElementById('adj-clear-btn');
+    listPanel = document.getElementById('adjacency-list-panel');
+    listBody = document.getElementById('adj-list-body');
+    listCount = document.getElementById('adj-list-count');
+    listClose = document.getElementById('adj-list-close');
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;',
+      '"': '&quot;', "'": '&#39;',
+    }[c]));
+  }
+
+  function updateStepStyles() {
+    if (!fromEl) return;
+    // step 1
+    fromEl.classList.toggle('active', fromId === null);
+    fromEl.classList.toggle('filled', fromId !== null);
+    fromDisplay.textContent = (fromId !== null) ? String(fromId) : '-';
+    // step 2
+    toEl.classList.toggle('active', fromId !== null && toId === null);
+    toEl.classList.toggle('filled', toId !== null);
+    toDisplay.textContent = (toId !== null) ? String(toId) : '-';
+  }
+
+  function updateHint() {
+    if (!hint) return;
+    hint.classList.remove('warn', 'ok');
+    if (fromId === null) {
+      hint.textContent = '캔버스에서 첫 프로빈스를 클릭하세요.';
+    } else if (toId === null) {
+      hint.textContent = '두번째 프로빈스를 클릭하세요. (같은 ID는 불가)';
+    } else {
+      hint.textContent = `${fromId} → ${toId} 준비됨. 옵션 입력 후 [추가]를 누르세요.`;
+      hint.classList.add('ok');
+    }
+  }
+
+  function updateAddBtn() {
+    if (!addBtn) return;
+    // Rule은 select라 항상 OK
+    const ready = (fromId !== null && toId !== null && fromId !== toId);
+    addBtn.disabled = !ready;
+  }
+
+  function validateRuleLive() {
+    // Rule이 select로 바뀌어 옵션 외 값이 들어올 수 없음. 검증은 항상 성공.
+    if (!ruleInput) return;
+    ruleInput.classList.remove('invalid');
+    if (ruleValidity) ruleValidity.textContent = '';
+    updateAddBtn();
+  }
+
+  function render() {
+    cache();
+    if (!svg) return;
+    if (typeof state === 'undefined' || !state.loaded) {
+      svg.innerHTML = '';
+      return;
+    }
+    // 인접 모드가 아니면 아무것도 그리지 않음 (다른 모드 영향 방지)
+    if (state.mode !== 'adjacency') {
+      svg.innerHTML = '';
+      return;
+    }
+    const z = state.zoom;
+    const px0 = state.panX;
+    const py0 = state.panY;
+    const parts = [];
+
+    function toScreen(imgX, imgY) {
+      return [(imgX + 0.5) * z + px0, (imgY + 0.5) * z + py0];
+    }
+
+    // ── (1) 영구 인접 선: 모든 기존 adjacency를 type 별 색으로 ──
+    //    각 선마다 보이는 라인 + 투명 두꺼운 hit-line(클릭 영역 확보)을 같이 그림.
+    if (centroidsById && allAdjacencies.length > 0) {
+      for (const a of allAdjacencies) {
+        const c1 = centroidsById[a.fromId];
+        const c2 = centroidsById[a.toId];
+        if (!c1 || !c2) continue;
+        const [x1, y1] = toScreen(c1[0], c1[1]);
+        const [x2, y2] = toScreen(c2[0], c2[1]);
+        // 화면 클리핑 (성능)
+        const W = svg.clientWidth, H = svg.clientHeight;
+        const minX = Math.min(x1, x2), maxX = Math.max(x1, x2);
+        const minY = Math.min(y1, y2), maxY = Math.max(y1, y2);
+        if (maxX < -10 || maxY < -10 || minX > W + 10 || minY > H + 10) continue;
+
+        let cls = 'adj-perm-line';
+        if (a.type === 'sea') cls += ' kind-sea';
+        else if (a.type === 'impassable') cls += ' kind-impassable';
+        else if (a.type === 'river') cls += ' kind-river';
+        else cls += ' kind-strait';
+        const isSel = (editingIndex !== null && a.index === editingIndex);
+        if (isSel) cls += ' selected';
+        const dotCls = isSel ? 'adj-perm-dot selected' : 'adj-perm-dot';
+        const idx = a.index;
+        parts.push(
+          // 클릭 hit area (두께 10, 투명)
+          `<line class="adj-perm-hit" data-idx="${idx}" x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}"/>` +
+          // 시각 라인
+          `<line class="${cls}" data-idx="${idx}" x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}"/>` +
+          `<circle class="${dotCls} ${cls.replace('adj-perm-line','').trim()}" cx="${x1.toFixed(1)}" cy="${y1.toFixed(1)}" r="2.5"/>` +
+          `<circle class="${dotCls} ${cls.replace('adj-perm-line','').trim()}" cx="${x2.toFixed(1)}" cy="${y2.toFixed(1)}" r="2.5"/>`
+        );
+      }
+    }
+
+    // ── (2) 현재 선택 중인 임시 선 (From-To 점선) ──
+    function pushTempLine(a, b) {
+      if (!a || !b) return;
+      const [ax, ay] = toScreen(a[0], a[1]);
+      const [bx, by] = toScreen(b[0], b[1]);
+      parts.push(`<line class="adj-link-line" x1="${ax.toFixed(1)}" y1="${ay.toFixed(1)}" x2="${bx.toFixed(1)}" y2="${by.toFixed(1)}"/>`);
+    }
+    if (fromXY && toXY) pushTempLine(fromXY, toXY);
+    svg.innerHTML = parts.join('');
+  }
+
+  // ── 프로빈스 영역 색칠 (overlay-canvas) ──
+  // 선택된 프로빈스 RGB와 일치하는 모든 픽셀을 반투명으로 칠한다.
+  // From=주황, To=청록. 캔버스 좌표는 이미지 픽셀 그대로 (transform이 알아서 적용).
+  function repaintProvinceMask() {
+    if (!overlayCanvas || !overlayCtx) return;
+    if (typeof state === 'undefined' || !state.loaded) return;
+
+    // 인접 모드 아닐 때는 손대지 않음 (다른 모드의 overlay 잔상 보호)
+    if (state.mode !== 'adjacency') return;
+
+    overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+    if (!fromRgb && !toRgb) return;
+    if (!state.imageData) return;
+
+    const src = state.imageData.data;
+    const W = state.width, H = state.height;
+    const dst = overlayCtx.createImageData(W, H);
+    const out = dst.data;
+
+    const [fr, fg, fb] = fromRgb || [-1, -1, -1];
+    const [tr, tg, tb] = toRgb || [-1, -1, -1];
+
+    for (let i = 0; i < src.length; i += 4) {
+      const r = src[i], g = src[i+1], b = src[i+2];
+      if (fromRgb && r === fr && g === fg && b === fb) {
+        // 주황 반투명
+        out[i] = 255; out[i+1] = 140; out[i+2] = 0; out[i+3] = 140;
+      } else if (toRgb && r === tr && g === tg && b === tb) {
+        // 청록 반투명
+        out[i] = 0; out[i+1] = 200; out[i+2] = 220; out[i+3] = 140;
+      }
+    }
+    overlayCtx.putImageData(dst, 0, 0);
+  }
+
+  async function handleClick(x, y) {
+    cache();
+    if (x < 0 || y < 0 || x >= state.width || y >= state.height) return;
+    // 편집 중에는 두 칸이 모두 차 있으면 캔버스 클릭 무시 (의도치 않은 손실 방지).
+    // 단, FROM/TO 칩 클릭으로 한쪽을 비운 상태(재선택 시작)라면 클릭을 받는다.
+    if (editingIndex !== null && fromId !== null && toId !== null) {
+      hint.textContent = '편집 중입니다. FROM/TO 칩을 눌러 재선택하거나 [↺]/[저장]/[삭제]를 사용하세요.';
+      hint.classList.add('warn');
+      return;
+    }
+    // 백엔드에서 정확한 프로빈스 ID 조회
+    let pid = null;
+    try {
+      const r = await window.pywebview.api.get_province_id_at_pixel(x, y);
+      if (r && r.ok) pid = r.provinceId;
+    } catch (_) {}
+    if (pid === null || pid === undefined) {
+      hint.textContent = '해당 픽셀에서 프로빈스 ID를 찾을 수 없습니다.';
+      hint.classList.add('warn');
+      return;
+    }
+
+    // 클릭 픽셀의 RGB도 같이 얻기 (state.imageData에서 직접)
+    const [r0, g0, b0] = getPixel(x, y);
+    const clickedRgb = [r0, g0, b0];
+    // centroid 좌표 (영구 선 표시용은 centroid가 자연스럽지만, 임시 선은 클릭점 그대로)
+    const c = centroidsById ? centroidsById[pid] : null;
+    const xy = c ? [c[0], c[1]] : [x, y];
+
+    if (fromId === null) {
+      fromId = pid;
+      fromXY = xy;
+      fromRgb = clickedRgb;
+    } else if (toId === null) {
+      if (pid === fromId) {
+        hint.textContent = 'From과 같은 프로빈스입니다. 다른 프로빈스를 클릭하세요.';
+        hint.classList.add('warn');
+        return;
+      }
+      toId = pid;
+      toXY = xy;
+      toRgb = clickedRgb;
+    } else {
+      // 둘 다 차 있으면 다시 처음부터 (사용자가 마음을 바꿈)
+      fromId = pid;
+      fromXY = xy;
+      fromRgb = clickedRgb;
+      toId = null;
+      toXY = null;
+      toRgb = null;
+    }
+    updateStepStyles();
+    updateHint();
+    updateAddBtn();
+    render();
+    repaintProvinceMask();
+    // From과 To가 모두 정해지면 Through 자동 추론(수동 편집 안 했을 때만)
+    if (fromId !== null && toId !== null) {
+      autoFillThrough(false);
+    } else if (throughRefreshBtn) {
+      throughRefreshBtn.disabled = true;
+    }
+  }
+
+  function cancel() {
+    // 신규/편집 모두 동일하게: 선택과 입력을 모두 해제 (단 입력 필드값은 유지)
+    cache();
+    clearSelection();
+  }
+
+  async function add() {
+    cache();
+    if (fromId === null || toId === null) return;
+    const ruleVal = ruleInput.value.trim();
+    if (ruleVal && !RULE_RE.test(ruleVal)) {
+      validateRuleLive();
+      return;
+    }
+    addBtn.disabled = true;
+    const origText = addBtn.textContent;
+    addBtn.textContent = '추가 중…';
+    try {
+      const r = await window.pywebview.api.add_adjacency(
+        fromId, toId,
+        typeSel.value || '',
+        parseInt(throughInput.value, 10),
+        ruleVal,
+        commentInput.value.trim(),
+      );
+      if (!r || !r.ok) {
+        hint.textContent = '추가 실패: ' + (r && r.error ? r.error : 'unknown');
+        hint.classList.add('warn');
+        return;
+      }
+      // 성공 → 다음 입력 준비. 옵션 값은 유지(연속 작업 편의).
+      hint.textContent = `✓ ${fromId} ↔ ${toId} 추가됨 (총 ${r.count}개). 다음 프로빈스를 클릭하세요.`;
+      hint.classList.add('ok');
+      fromId = toId = null;
+      fromXY = toXY = null;
+      fromRgb = toRgb = null;
+      throughManuallyEdited = false;
+      if (throughRefreshBtn) {
+        throughRefreshBtn.disabled = true;
+        throughRefreshBtn.classList.remove('auto-filled');
+      }
+      updateStepStyles();
+      updateAddBtn();
+      // 마스크 클리어
+      if (overlayCanvas && overlayCtx) {
+        overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+      }
+      // 인접 목록 즉시 갱신해서 영구 선 표시
+      await refreshList();
+      render();
+    } catch (e) {
+      hint.textContent = '추가 중 예외: ' + e.message;
+      hint.classList.add('warn');
+    } finally {
+      addBtn.disabled = false;
+      addBtn.textContent = origText;
+      updateAddBtn();
+    }
+  }
+
+  // 이전 버전의 기능 패널 badge는 제거됨. 호환을 위해 no-op로 유지.
+  function updateCountBadge(_n) { /* no-op */ }
+
+  async function refreshList() {
+    cache();
+    if (!listBody) return;
+    try {
+      const r = await window.pywebview.api.list_adjacencies();
+      if (!r || !r.ok) {
+        listBody.innerHTML = `<p style="padding:12px;color:var(--muted)">불러오기 실패: ${r && r.error ? escapeHtml(r.error) : 'unknown'}</p>`;
+        return;
+      }
+      const items = r.items || [];
+      allAdjacencies = items;  // 캐시: render()가 영구 선 그릴 때 사용
+      listCount.textContent = `${items.length}개`;
+      // 영구 선 다시 그리기
+      render();
+      if (!items.length) {
+        listBody.innerHTML = '<p style="padding:12px;color:var(--muted)">아직 등록된 인접이 없습니다.</p>';
+        return;
+      }
+      const html = items.map(it => {
+        const route = `${it.fromId} ↔ ${it.toId}`;
+        const typeBadge = it.type ? it.type : '(strait/canal)';
+        const through = (it.through !== null && it.through !== -1) ? `through ${it.through}` : '';
+        const rule = it.ruleName ? `rule: ${it.ruleName}` : '';
+        const cmt = it.comment || '';
+        const metaParts = [
+          `<span class="badge-mini">${escapeHtml(typeBadge)}</span>`,
+          through ? escapeHtml(through) : '',
+          rule ? escapeHtml(rule) : '',
+          cmt ? escapeHtml(cmt) : '',
+        ].filter(Boolean).join(' · ');
+        return `
+          <div class="adj-item" data-index="${it.index}">
+            <div class="adj-item-main">
+              <div class="adj-item-route">${escapeHtml(route)}</div>
+              <div class="adj-item-meta">${metaParts}</div>
+            </div>
+            <button class="adj-item-del" data-index="${it.index}" title="삭제">×</button>
+          </div>`;
+      }).join('');
+      listBody.innerHTML = html;
+    } catch (e) {
+      listBody.innerHTML = `<p style="padding:12px;color:var(--muted)">예외: ${escapeHtml(e.message)}</p>`;
+    }
+  }
+
+  function toggleList() {
+    cache();
+    if (!listPanel) return;
+    const wasHidden = listPanel.classList.contains('hidden');
+    listPanel.classList.toggle('hidden');
+    if (wasHidden) refreshList();
+  }
+
+  // 모드별 버튼 표시: 신규(creating) vs 편집(editing)
+  function updateModeButtons() {
+    cache();
+    const editing = (editingIndex !== null);
+    if (addBtn) addBtn.hidden = editing;
+    if (saveBtn) saveBtn.hidden = !editing;
+    if (deleteBtn) deleteBtn.hidden = !editing;
+  }
+
+  // 선택 진입: index의 항목 값들을 하단 바에 채우고 편집 모드로
+  function selectAdjacency(index) {
+    cache();
+    const item = allAdjacencies.find(x => x.index === index);
+    if (!item) return;
+
+    editingIndex = index;
+    fromId = item.fromId;
+    toId = item.toId;
+    // RGB는 백엔드에서 가져와 마스크에 사용
+    refreshSelectedProvinceRgbs(item.fromId, item.toId);
+
+    // centroid → 임시 좌표 (선 표시용 / 신규 모드와 동일 처리)
+    const c1 = centroidsById ? centroidsById[item.fromId] : null;
+    const c2 = centroidsById ? centroidsById[item.toId] : null;
+    fromXY = c1 ? [c1[0], c1[1]] : null;
+    toXY = c2 ? [c2[0], c2[1]] : null;
+
+    // 필드 값 채움
+    typeSel.value = item.type || '';
+    throughInput.value = (item.through !== undefined && item.through !== null) ? String(item.through) : '-1';
+    // 편집 진입 시 through는 "이미 저장된 사용자 결정"으로 간주 → 자동 채움 안 함
+    throughManuallyEdited = true;
+    if (throughRefreshBtn) {
+      throughRefreshBtn.disabled = false;
+      throughRefreshBtn.classList.remove('auto-filled');
+    }
+    // rule이 현재 옵션 목록에 없으면(다른 모드에서 이식 등) 임시 옵션으로 추가
+    if (item.ruleName) {
+      const has = Array.from(ruleInput.options).some(o => o.value === item.ruleName);
+      if (!has) {
+        const opt = document.createElement('option');
+        opt.value = item.ruleName;
+        opt.textContent = item.ruleName + ' (외부)';
+        ruleInput.appendChild(opt);
+      }
+    }
+    ruleInput.value = item.ruleName || '';
+    commentInput.value = item.comment || '';
+
+    updateStepStyles();
+    updateModeButtons();
+    validateRuleLive();
+    if (hint) {
+      hint.textContent = `편집 중: ${item.fromId} ↔ ${item.toId}. 값 수정 후 [저장] 또는 [삭제].`;
+      hint.classList.remove('warn');
+      hint.classList.add('ok');
+    }
+    // 목록 항목 selected 갱신
+    if (listBody) {
+      listBody.querySelectorAll('.adj-item').forEach(el => {
+        const i = parseInt(el.dataset.index, 10);
+        el.classList.toggle('selected', i === index);
+      });
+    }
+    render();
+  }
+
+  async function refreshSelectedProvinceRgbs(fId, tId) {
+    try {
+      const a = await window.pywebview.api.get_province_rgb(fId);
+      if (a && a.ok) fromRgb = a.rgb;
+    } catch (_) {}
+    try {
+      const b = await window.pywebview.api.get_province_rgb(tId);
+      if (b && b.ok) toRgb = b.rgb;
+    } catch (_) {}
+    repaintProvinceMask();
+  }
+
+  // 편집 저장
+  async function saveEdit() {
+    cache();
+    if (editingIndex === null) return;
+    if (fromId === null || toId === null) {
+      hint.textContent = 'From/To가 비어있습니다.';
+      hint.classList.add('warn');
+      return;
+    }
+    const ruleVal = ruleInput.value.trim();
+    if (ruleVal && !RULE_RE.test(ruleVal)) {
+      validateRuleLive();
+      return;
+    }
+    saveBtn.disabled = true;
+    try {
+      const r = await window.pywebview.api.update_adjacency(
+        editingIndex,
+        fromId, toId,
+        typeSel.value || '',
+        parseInt(throughInput.value, 10),
+        ruleVal,
+        commentInput.value.trim(),
+      );
+      if (!r || !r.ok) {
+        hint.textContent = '저장 실패: ' + (r && r.error ? r.error : 'unknown');
+        hint.classList.add('warn');
+        return;
+      }
+      hint.textContent = `✓ 저장됨 (#${editingIndex}).`;
+      hint.classList.add('ok');
+      await refreshList();   // allAdjacencies 갱신
+      // 편집 상태는 유지 (사용자가 연속 수정 후 닫고 싶을 때 ↺)
+      render();
+    } catch (e) {
+      hint.textContent = '저장 중 예외: ' + e.message;
+      hint.classList.add('warn');
+    } finally {
+      saveBtn.disabled = false;
+    }
+  }
+
+  // 편집 삭제
+  async function deleteEdit() {
+    cache();
+    if (editingIndex === null) return;
+    if (!confirm(`이 인접 항목 (#${editingIndex}: ${fromId} ↔ ${toId}) 을 삭제할까요?`)) return;
+    const idx = editingIndex;
+    deleteBtn.disabled = true;
+    try {
+      const r = await window.pywebview.api.delete_adjacency(idx);
+      if (!r || !r.ok) {
+        hint.textContent = '삭제 실패: ' + (r && r.error ? r.error : 'unknown');
+        hint.classList.add('warn');
+        return;
+      }
+      hint.textContent = `✓ #${idx} 삭제됨 (남은 ${r.count}개).`;
+      hint.classList.add('ok');
+      // 선택 해제 후 새 입력 대기 상태로
+      clearSelection();
+      await refreshList();
+      render();
+    } catch (e) {
+      hint.textContent = '삭제 중 예외: ' + e.message;
+      hint.classList.add('warn');
+    } finally {
+      deleteBtn.disabled = false;
+    }
+  }
+
+  // Through 자동 추론. force=true면 사용자 수동편집 플래그를 무시하고 강제 실행.
+  async function autoFillThrough(force) {
+    cache();
+    if (fromId === null || toId === null) {
+      if (throughRefreshBtn) throughRefreshBtn.disabled = true;
+      return;
+    }
+    if (throughRefreshBtn) throughRefreshBtn.disabled = false;
+    if (!force && throughManuallyEdited) return;
+
+    // 새로고침 버튼이면 회전 애니메이션
+    if (throughRefreshBtn) {
+      throughRefreshBtn.classList.add('spinning');
+      throughRefreshBtn.disabled = true;
+    }
+    try {
+      const r = await window.pywebview.api.pick_through_province(fromId, toId);
+      if (!r || !r.ok) return;
+      const v = (typeof r.through === 'number') ? r.through : -1;
+      throughInput.value = String(v);
+      // 자동 채워졌음을 시각으로 표시 (다음 사용자 입력 전까지)
+      if (throughRefreshBtn) throughRefreshBtn.classList.toggle('auto-filled', v !== -1);
+      throughManuallyEdited = false;  // 자동 채움 후엔 다시 플래그 리셋
+      // 상태 메시지
+      if (hint && v !== -1 && r.via) {
+        hint.textContent = `Through 자동 추론: ${v} (via ${r.via})`;
+      } else if (hint && v === -1) {
+        hint.textContent = 'Through 자동 추론 실패 (사이에 바다/호수 없음). 수동 입력 가능.';
+      }
+    } catch (_) {
+      // 실패는 조용히 — 사용자가 수동 입력하면 됨
+    } finally {
+      if (throughRefreshBtn) {
+        // 다음 프레임에서 클래스 제거 (transition 트리거)
+        setTimeout(() => throughRefreshBtn.classList.remove('spinning'), 350);
+        throughRefreshBtn.disabled = (fromId === null || toId === null);
+      }
+    }
+  }
+
+  // From/To 칩 클릭 시 해당 단계만 비워 캔버스로 재선택받기.
+  // 편집 모드(editingIndex != null)에서도 사용 가능 — 한쪽만 갈아끼우고 [저장]하면 됨.
+  function reopenStep(stepNo) {
+    cache();
+    if (state.mode !== 'adjacency') return;
+    if (stepNo === 1) {
+      fromId = null;
+      fromXY = null;
+      fromRgb = null;
+    } else if (stepNo === 2) {
+      toId = null;
+      toXY = null;
+      toRgb = null;
+    } else {
+      return;
+    }
+    // 한쪽이 비워지면 Through 자동 추론 불가 → 버튼 비활성, 자동 표시 해제
+    if (throughRefreshBtn) {
+      throughRefreshBtn.disabled = true;
+      throughRefreshBtn.classList.remove('auto-filled');
+    }
+    updateStepStyles();
+    updateHint();
+    updateAddBtn();
+    repaintProvinceMask();
+    render();
+  }
+
+  // 편집/선택 해제 (cancel과 분리: cancel은 신규 입력 중에도 사용)
+  function clearSelection() {
+    editingIndex = null;
+    fromId = toId = null;
+    fromXY = toXY = null;
+    fromRgb = toRgb = null;
+    throughManuallyEdited = false;
+    if (throughRefreshBtn) {
+      throughRefreshBtn.disabled = true;
+      throughRefreshBtn.classList.remove('auto-filled');
+    }
+    updateStepStyles();
+    updateHint();
+    updateAddBtn();
+    updateModeButtons();
+    if (overlayCanvas && overlayCtx) {
+      overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+    }
+    if (listBody) {
+      listBody.querySelectorAll('.adj-item.selected').forEach(el => el.classList.remove('selected'));
+    }
+    render();
+  }
+
+  function init() {
+    cache();
+    if (!addBtn) return;  // 패널이 없으면 작동 안 함
+    addBtn.addEventListener('click', add);
+    if (saveBtn) saveBtn.addEventListener('click', saveEdit);
+    if (deleteBtn) deleteBtn.addEventListener('click', deleteEdit);
+    clearBtn.addEventListener('click', cancel);
+    ruleInput.addEventListener('input', validateRuleLive);
+    // From/To 칩 클릭 → 해당 단계만 재선택
+    if (fromEl) fromEl.addEventListener('click', () => reopenStep(1));
+    if (toEl) toEl.addEventListener('click', () => reopenStep(2));
+
+    // Through 사용자 직접 수정 감지 (자동 채움 비활성)
+    if (throughInput) {
+      throughInput.addEventListener('input', () => {
+        throughManuallyEdited = true;
+        if (throughRefreshBtn) throughRefreshBtn.classList.remove('auto-filled');
+      });
+    }
+    // Through 새로고침 버튼 → 강제 재계산
+    if (throughRefreshBtn) {
+      throughRefreshBtn.addEventListener('click', () => autoFillThrough(true));
+    }
+    if (listClose) listClose.addEventListener('click', () => listPanel.classList.add('hidden'));
+
+    // SVG 위의 영구 선 클릭으로 선택
+    if (svg) {
+      svg.addEventListener('click', (e) => {
+        if (state.mode !== 'adjacency') return;
+        const hit = e.target.closest('.adj-perm-hit, .adj-perm-line');
+        if (!hit) return;
+        const idx = parseInt(hit.getAttribute('data-idx'), 10);
+        if (Number.isNaN(idx)) return;
+        selectAdjacency(idx);
+      });
+    }
+    if (listBody) listBody.addEventListener('click', async (e) => {
+      // 삭제 버튼 클릭
+      const delBtn = e.target.closest('button.adj-item-del');
+      if (delBtn) {
+        e.stopPropagation();
+        const idx = parseInt(delBtn.dataset.index, 10);
+        if (Number.isNaN(idx)) return;
+        if (!confirm('이 인접 항목을 삭제할까요?')) return;
+        try {
+          const r = await window.pywebview.api.delete_adjacency(idx);
+          if (!r || !r.ok) {
+            alert('삭제 실패: ' + (r && r.error ? r.error : 'unknown'));
+            return;
+          }
+          // 만약 삭제한 항목이 현재 편집 중이면 선택 해제
+          if (editingIndex === idx) clearSelection();
+          refreshList();
+        } catch (err) {
+          alert('삭제 중 예외: ' + err.message);
+        }
+        return;
+      }
+      // 항목 전체 클릭 → 선택 진입
+      const itemEl = e.target.closest('.adj-item');
+      if (!itemEl) return;
+      const idx = parseInt(itemEl.dataset.index, 10);
+      if (Number.isNaN(idx)) return;
+      selectAdjacency(idx);
+    });
+    updateStepStyles();
+    updateHint();
+    updateAddBtn();
+    updateModeButtons();
+    // pywebview 준비 후 카운트 가져오기 시도 (지연 호출)
+    function tryFetchCount() {
+      if (window.pywebview && window.pywebview.api && window.pywebview.api.list_adjacencies) {
+        window.pywebview.api.list_adjacencies().then(r => {
+          if (r && r.ok) updateCountBadge((r.items || []).length);
+        }).catch(() => {});
+      }
+    }
+    window.addEventListener('pywebviewready', tryFetchCount);
+    // 이미 준비된 경우 (재실행 등)
+    setTimeout(tryFetchCount, 1000);
+  }
+
+  // adjacency_rules.txt 의 rule 이름들을 드롭다운에 채움.
+  async function populateRuleOptions() {
+    cache();
+    if (!ruleInput) return;
+    let names = [];
+    try {
+      const r = await window.pywebview.api.list_adjacency_rules();
+      if (r && r.ok) names = r.names || [];
+    } catch (_) {}
+    const current = ruleInput.value;
+    const opts = ['<option value="">(없음)</option>'];
+    for (const n of names) {
+      opts.push(`<option value="${n}">${n}</option>`);
+    }
+    ruleInput.innerHTML = opts.join('');
+    // 기존 값이 옵션에 있으면 유지(편집 중 진입 안전).
+    if (current && names.includes(current)) ruleInput.value = current;
+  }
+
+  // 인접 모드 진입: centroids 로드 + rule 목록 로드 + 영구 인접 목록 로드 → 영구 선 표시.
+  async function enter() {
+    cache();
+    if (!centroidsById) {
+      try {
+        const r = await window.pywebview.api.get_province_centroids();
+        if (r && r.ok) centroidsById = r.centroids || {};
+      } catch (_) {
+        centroidsById = {};
+      }
+    }
+    await populateRuleOptions();
+    await refreshList();
+    render();
+  }
+
+  document.addEventListener('DOMContentLoaded', init);
+
+  return { handleClick, render, cancel, enter, repaintProvinceMask };
+})();

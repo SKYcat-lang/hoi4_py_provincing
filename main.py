@@ -52,6 +52,35 @@ from core.validators import (
     validate_rivers_bmp,
 )
 from core.split import split_region
+from core.delete import (
+    absorb_province,
+    compute_absorption_map,
+    find_best_absorber_rgb,
+)
+from core.external_files import apply_absorption_to_all
+from core.province_analyzer import find_used_colors
+from core.id_search import (
+    IdMatch,
+    SearchConfig,
+    find_placeholder_ids,
+    search_ids_in_mod,
+)
+from core.compact import (
+    apply_compaction,
+    build_min_invasive_plan,
+    rewrite_definition_csv,
+)
+from core.adjacencies import (
+    Adjacency,
+    add_adjacency as adj_add,
+    delete_adjacency as adj_delete,
+    load_adjacencies,
+    load_adjacency_rule_names,
+    sanitize_comment,
+    save_adjacencies,
+    update_adjacency as adj_update,
+    validate_adjacency,
+)
 
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -713,6 +742,105 @@ class Api:
             "skipped": 0,
         }
 
+    # -------- 인접 흡수(삭제) ----------
+
+    def delete_province_at(
+        self, x: int, y: int,
+        respect_lakes: bool = True, respect_sea: bool = True,
+    ) -> dict:
+        """(x,y)의 프로빈스를 가장 큰 인접 프로빈스의 RGB로 통째 덮어씀.
+
+        BMP에서 해당 RGB가 완전히 사라지면 다음 저장 시 자동으로
+        analyze_for_save_v2가 removed로 잡아내 외부 파일 정리까지 일관 처리.
+
+        반환:
+          ok, absorbedIntoRgb, absorbedIntoProvinceId, changedPixels
+        """
+        if self.provinces_arr is None:
+            return {"ok": False, "error": "맵이 로드되지 않았습니다."}
+
+        arr = self.provinces_arr
+        h, w = arr.shape[:2]
+        if not (0 <= x < w and 0 <= y < h):
+            return {"ok": False, "error": "범위 밖 좌표"}
+
+        target = tuple(int(c) for c in arr[y, x].tolist())
+        if target == (0, 0, 0):
+            return {"ok": False, "error": "(0,0,0) invalid 슬롯은 삭제 대상이 아닙니다."}
+
+        # 보호 토글: 호수/바다 프로빈스는 그 자체를 삭제 불가
+        target_prov = next((p for p in self.provinces if p.rgb == target), None)
+        if target_prov is not None:
+            if respect_lakes and target_prov.type == "lake":
+                return {
+                    "ok": False,
+                    "error": f"호수 보호: 프로빈스 ID {target_prov.id} (호수)는 삭제할 수 없습니다.",
+                    "blockedByProtection": True,
+                    "protectionType": "lake",
+                }
+            if respect_sea and target_prov.type == "sea":
+                return {
+                    "ok": False,
+                    "error": f"바다 보호: 프로빈스 ID {target_prov.id} (바다)는 삭제할 수 없습니다.",
+                    "blockedByProtection": True,
+                    "protectionType": "sea",
+                }
+
+        # 흡수자 후보에서 제외할 protected RGB 집합
+        protected: set[tuple[int, int, int]] = set()
+        if respect_lakes:
+            protected.update(p.rgb for p in self.provinces if p.type == "lake")
+        if respect_sea:
+            protected.update(p.rgb for p in self.provinces if p.type == "sea")
+
+        absorber = find_best_absorber_rgb(arr, target, protected)
+        if absorber is None:
+            return {
+                "ok": False,
+                "error": "흡수할 인접 프로빈스를 찾지 못했습니다. "
+                         "(보호된 색만 인접해 있거나 단독 영역일 수 있음)",
+            }
+
+        changes = absorb_province(arr, target, absorber)
+        if not changes:
+            return {"ok": False, "error": "변경된 픽셀이 없습니다."}
+
+        # 부모 추적: target → absorber로 잡아먹힌 것으로 카운트
+        # (저장 시 _rebuild_parent_counts_from_disk가 다시 만들지만, 임시 캐시도 갱신)
+        bucket = self.parent_pixel_counts.setdefault(absorber, {})
+        bucket[target] = bucket.get(target, 0) + len(changes)
+
+        absorber_prov = next((p for p in self.provinces if p.rgb == absorber), None)
+
+        return {
+            "ok": True,
+            "absorbedIntoRgb": list(absorber),
+            "absorbedIntoProvinceId": (absorber_prov.id if absorber_prov else None),
+            "deletedRgb": list(target),
+            "deletedProvinceId": (target_prov.id if target_prov else None),
+            "changedPixels": changes,
+            "pixelCount": len(changes),
+        }
+
+    # -------- 카운터 ----------
+
+    def get_live_province_count(self) -> dict:
+        """현재 BMP에 살아있는 unique RGB 수(= 다음 저장 후 프로빈스 수).
+
+        (0,0,0) invalid 슬롯은 제외. provinces.length가 아니라 BMP 기준이라
+        편집 중 새로 생성됐지만 미저장된 RGB도 함께 집계된다.
+        """
+        if self.provinces_arr is None:
+            return {"ok": False, "error": "맵이 로드되지 않았습니다."}
+        used = find_used_colors(self.provinces_arr)
+        used.discard((0, 0, 0))
+        count = len(used)
+        return {
+            "ok": True,
+            "liveCount": count,
+            "definitionCount": len(self.provinces),
+        }
+
     # -------- 자동 분할 ----------
 
     def split_province_at(self, x: int, y: int, avg_pixels: int,
@@ -1058,6 +1186,38 @@ class Api:
                     if changed and region.file_path not in modified_region_files:
                         modified_region_files.append(region.file_path)
 
+            # === 외부 파일 일괄 갱신 (인접 흡수 매핑 기반) ===
+            # 사라진 RGB가 흡수된 자리를 기반으로 외부 파일들의 prov_id를 재매핑한다.
+            # buildings / unitstacks / positions / weatherpositions: 단순 제거
+            # supply_nodes / railways / adjacencies / state(victory_points,buildings) /
+            # history/units(location) / decisions(set_province_name): 흡수자로 재매핑
+            external_summary = {"modifiedFiles": [], "totalRemovedLines": 0,
+                                "totalRemappedTokens": 0, "perFile": {}}
+            if removed_ids:
+                # disk_provinces_arr 는 이 함수 진입 시점의 디스크 스냅샷이고,
+                # write_provinces_bmp() 직후 self.provinces_arr 가 새 디스크 상태이므로
+                # 흡수 매핑은 (옛 디스크 vs 현재 메모리)로 계산해야 정확하다.
+                # 단, 이 시점 self.disk_provinces_arr는 아직 옛 디스크라 OK.
+                # provinces 인자는 새 ID가 부여된 all_provs(=self.provinces)로 전달해야
+                # 흡수자 RGB → ID 환산이 신규 프로빈스에도 동작.
+                absorption_map = compute_absorption_map(
+                    self.disk_provinces_arr, self.provinces_arr, self.provinces
+                )
+                if absorption_map:
+                    try:
+                        external_summary = apply_absorption_to_all(
+                            self.paths.map_dir, self.paths.mod_root, absorption_map
+                        )
+                    except Exception as exc:
+                        traceback.print_exc()
+                        external_summary = {
+                            "error": str(exc),
+                            "modifiedFiles": [],
+                            "totalRemovedLines": 0,
+                            "totalRemappedTokens": 0,
+                            "perFile": {},
+                        }
+
             # color pool 갱신
             self.color_pool = ColorPool(p.rgb for p in self.provinces)
 
@@ -1074,6 +1234,11 @@ class Api:
             # buildings.txt 자동 추가는 의도적으로 제거됨.
             # 게임이 buildings를 자동 관리하므로 손대지 않는 것이 안전함.
 
+            # 라이브 프로빈스 카운트 (한도 카운터 갱신용)
+            live_used = find_used_colors(self.provinces_arr)
+            live_used.discard((0, 0, 0))
+            live_count = len(live_used)
+
             return {
                 "ok": True,
                 "provincesBmp": self.paths.provinces_bmp,
@@ -1082,8 +1247,399 @@ class Api:
                 "removedProvinceCount": len(removed_ids),
                 "modifiedStateFiles": modified_state_files,
                 "modifiedRegionFiles": modified_region_files,
+                "modifiedExternalFiles": external_summary.get("modifiedFiles", []),
+                "externalSummary": external_summary,
+                "liveProvinceCount": live_count,
+                "definitionProvinceCount": len(self.provinces),
                 "xcrossings": [[x, y] for x, y in xcoords],
                 "xcrossingCount": len(xcoords),
+            }
+        except Exception as exc:
+            traceback.print_exc()
+            return {"ok": False, "error": str(exc), "trace": traceback.format_exc()}
+
+    # =====================================================================
+    # 최소침습 ID 병합 (감독자 모드)
+    # =====================================================================
+    # 사용 시나리오:
+    #   1) UI에서 "ID 갭 분석" 버튼 → scan_placeholder_ids() 호출
+    #      → 어떤 placeholder가 있고, 최소침습 계획상 어떤 매핑이 될지 미리보기 반환
+    #   2) UI에서 "검색" 버튼 → search_id_usages(ids) 호출
+    #      → 매핑 대상 ID들이 모드 폴더 어디에 등장하는지 매치 리스트 반환
+    #   3) 사용자가 매치별 Yes/No 선택
+    #   4) UI에서 "실행(드라이런)" → apply_min_invasive_compaction(..., dry_run=True)
+    #   5) 문제 없으면 "실행(실제)" → apply_min_invasive_compaction(..., dry_run=False)
+    # 자동화 금지 원칙: 4번 매치 승인 단계는 반드시 사용자 손을 거쳐야 한다.
+
+    def scan_placeholder_ids(self) -> dict:
+        """definition.csv에서 placeholder 행을 찾고 최소침습 매핑 미리보기 반환."""
+        if self.paths is None:
+            return {"ok": False, "error": "맵이 로드되지 않았습니다."}
+        try:
+            placeholder_ids = find_placeholder_ids(self.paths.definition_csv)
+            plan = build_min_invasive_plan(self.paths.definition_csv)
+            return {
+                "ok": True,
+                "placeholderIds": placeholder_ids,
+                "plan": plan.to_dict(),
+                # UI 편의를 위해 매핑을 (old, new) 튜플 리스트로도 제공
+                "movePairs": sorted(
+                    [[old, new] for old, new in plan.id_map.items()],
+                    key=lambda kv: kv[1],
+                ),
+            }
+        except Exception as exc:
+            traceback.print_exc()
+            return {"ok": False, "error": str(exc), "trace": traceback.format_exc()}
+
+    def search_id_usages(self, ids: list[int]) -> dict:
+        """주어진 ID들이 모드 폴더 안에서 등장하는 모든 위치 반환.
+
+        ids: 검색할 ID 정수 리스트. 보통 movePairs의 old_id들.
+        """
+        if self.paths is None:
+            return {"ok": False, "error": "맵이 로드되지 않았습니다."}
+        try:
+            int_ids = [int(i) for i in ids if int(i) > 0]
+            if not int_ids:
+                return {"ok": True, "matches": []}
+            matches = search_ids_in_mod(
+                self.paths.mod_root, int_ids, SearchConfig(),
+            )
+            return {
+                "ok": True,
+                "matches": [m.to_dict() for m in matches],
+                "matchCount": len(matches),
+            }
+        except Exception as exc:
+            traceback.print_exc()
+            return {"ok": False, "error": str(exc), "trace": traceback.format_exc()}
+
+    def apply_min_invasive_compaction(
+        self, approved_matches: list[dict], dry_run: bool = False,
+    ) -> dict:
+        """사용자가 승인한 매치만 새 ID로 치환하고 definition.csv 재작성.
+
+        approved_matches: search_id_usages()가 반환한 dict 형태 매치들 중 사용자가
+        Yes로 표시한 것들. 각 dict는 filePath/relPath/lineNo/lineText/matchedId/
+        colStart/colEnd 필드를 가진다.
+
+        dry_run=True: 실제 파일은 안 건드리고 영향 범위만 리포트.
+        dry_run=False: definition.csv 재작성 + 외부 파일 치환 적용.
+        """
+        if self.paths is None:
+            return {"ok": False, "error": "맵이 로드되지 않았습니다."}
+        try:
+            plan = build_min_invasive_plan(self.paths.definition_csv)
+
+            # dict → IdMatch 객체 변환
+            id_match_objs: list[IdMatch] = []
+            for d in approved_matches or []:
+                try:
+                    id_match_objs.append(IdMatch(
+                        file_path=str(d["filePath"]),
+                        rel_path=str(d.get("relPath", "")),
+                        line_no=int(d["lineNo"]),
+                        line_text=str(d.get("lineText", "")),
+                        matched_id=int(d["matchedId"]),
+                        col_start=int(d.get("colStart", 0)),
+                        col_end=int(d.get("colEnd", 0)),
+                    ))
+                except (KeyError, TypeError, ValueError):
+                    continue
+
+            apply_report = apply_compaction(plan, id_match_objs, dry_run=dry_run)
+
+            if not dry_run:
+                # definition.csv 재작성 (placeholder 제거 + mover 이동)
+                rewrite_definition_csv(plan, self.paths.definition_csv)
+                # 메모리상 self.provinces도 갱신
+                self.provinces = list(plan.new_provinces)
+
+            return {
+                "ok": True,
+                "dryRun": dry_run,
+                "plan": plan.to_dict(),
+                "report": apply_report.to_dict(),
+            }
+        except Exception as exc:
+            traceback.print_exc()
+            return {"ok": False, "error": str(exc), "trace": traceback.format_exc()}
+
+    # =====================================================================
+    # adjacencies.csv 편집 (인접 연결 모드)
+    # =====================================================================
+
+    def _adjacencies_csv_path(self) -> Optional[str]:
+        if self.paths is None:
+            return None
+        return os.path.join(self.paths.map_dir, "adjacencies.csv")
+
+    def list_adjacencies(self) -> dict:
+        """현재 adjacencies.csv 의 모든 항목 반환 (index 포함)."""
+        path = self._adjacencies_csv_path()
+        if path is None:
+            return {"ok": False, "error": "맵이 로드되지 않았습니다."}
+        try:
+            af = load_adjacencies(path)
+            return {
+                "ok": True,
+                "items": [{"index": i, **adj.to_dict()} for i, adj in enumerate(af.items)],
+                "count": len(af.items),
+            }
+        except Exception as exc:
+            traceback.print_exc()
+            return {"ok": False, "error": str(exc), "trace": traceback.format_exc()}
+
+    def list_adjacency_rules(self) -> dict:
+        """map/adjacency_rules.txt 에서 정의된 rule 이름 목록 반환.
+
+        모더가 모드 폴더 안에 새 rule을 추가하면 자동으로 드롭다운에 반영된다.
+        """
+        if self.paths is None:
+            return {"ok": False, "error": "맵이 로드되지 않았습니다."}
+        try:
+            rules_path = os.path.join(self.paths.map_dir, "adjacency_rules.txt")
+            names = load_adjacency_rule_names(rules_path)
+            return {"ok": True, "names": names, "path": rules_path}
+        except Exception as exc:
+            traceback.print_exc()
+            return {"ok": False, "error": str(exc), "trace": traceback.format_exc()}
+
+    def add_adjacency(
+        self,
+        from_id: int,
+        to_id: int,
+        type_: str = "",
+        through: int = -1,
+        rule_name: str = "",
+        comment: str = "",
+    ) -> dict:
+        """인접 항목을 추가하고 adjacencies.csv를 즉시 저장.
+
+        UI에서 시각 좌표(start_x/y/stop_x/stop_y)는 -1로 둔다(엔진이 자동 결정).
+        """
+        path = self._adjacencies_csv_path()
+        if path is None:
+            return {"ok": False, "error": "맵이 로드되지 않았습니다."}
+        try:
+            adj = Adjacency(
+                from_id=int(from_id),
+                to_id=int(to_id),
+                type=(type_ or "").strip(),
+                through=int(through) if through is not None else -1,
+                rule_name=(rule_name or "").strip(),
+                comment=sanitize_comment(comment or ""),
+            )
+            err = validate_adjacency(adj, allow_existing=False)
+            if err:
+                return {"ok": False, "error": err}
+            af = load_adjacencies(path)
+            err = adj_add(af, adj)
+            if err:
+                return {"ok": False, "error": err}
+            save_adjacencies(af)
+            return {
+                "ok": True,
+                "added": adj.to_dict(),
+                "index": len(af.items) - 1,
+                "count": len(af.items),
+            }
+        except Exception as exc:
+            traceback.print_exc()
+            return {"ok": False, "error": str(exc), "trace": traceback.format_exc()}
+
+    def delete_adjacency(self, index: int) -> dict:
+        """주어진 index의 인접 항목 삭제."""
+        path = self._adjacencies_csv_path()
+        if path is None:
+            return {"ok": False, "error": "맵이 로드되지 않았습니다."}
+        try:
+            af = load_adjacencies(path)
+            err = adj_delete(af, int(index))
+            if err:
+                return {"ok": False, "error": err}
+            save_adjacencies(af)
+            return {"ok": True, "count": len(af.items)}
+        except Exception as exc:
+            traceback.print_exc()
+            return {"ok": False, "error": str(exc), "trace": traceback.format_exc()}
+
+    def update_adjacency(
+        self,
+        index: int,
+        from_id: int,
+        to_id: int,
+        type_: str = "",
+        through: int = -1,
+        rule_name: str = "",
+        comment: str = "",
+    ) -> dict:
+        """기존 인접 항목을 새 값으로 교체."""
+        path = self._adjacencies_csv_path()
+        if path is None:
+            return {"ok": False, "error": "맵이 로드되지 않았습니다."}
+        try:
+            new_adj = Adjacency(
+                from_id=int(from_id),
+                to_id=int(to_id),
+                type=(type_ or "").strip(),
+                through=int(through) if through is not None else -1,
+                rule_name=(rule_name or "").strip(),
+                comment=sanitize_comment(comment or ""),
+            )
+            err = validate_adjacency(new_adj, allow_existing=True)
+            if err:
+                return {"ok": False, "error": err}
+            af = load_adjacencies(path)
+            err = adj_update(af, int(index), new_adj)
+            if err:
+                return {"ok": False, "error": err}
+            save_adjacencies(af)
+            return {
+                "ok": True,
+                "updated": new_adj.to_dict(),
+                "index": int(index),
+                "count": len(af.items),
+            }
+        except Exception as exc:
+            traceback.print_exc()
+            return {"ok": False, "error": str(exc), "trace": traceback.format_exc()}
+
+    def get_province_centroids(self) -> dict:
+        """모든 프로빈스의 중심점(픽셀 평균 좌표) 매핑 반환.
+
+        반환 형식: {provinceId: [cx, cy], ...}
+        영구 인접 선의 양 끝점을 그리는 데 사용. 한 번 계산 후 프론트엔드에서 캐싱.
+        """
+        if self.provinces_arr is None or self.paths is None:
+            return {"ok": False, "error": "맵이 로드되지 않았습니다."}
+        try:
+            arr = self.provinces_arr
+            # RGB → 24bit packed
+            packed = (
+                arr[..., 0].astype(np.int64) << 16
+                | arr[..., 1].astype(np.int64) << 8
+                | arr[..., 2].astype(np.int64)
+            )
+            flat = packed.reshape(-1)
+            h, w = arr.shape[:2]
+            ys, xs = np.divmod(np.arange(flat.size, dtype=np.int64), w)
+
+            # 각 RGB(packed)별 픽셀 합과 카운트
+            unique_packed, inverse = np.unique(flat, return_inverse=True)
+            counts = np.bincount(inverse)
+            sum_x = np.bincount(inverse, weights=xs.astype(np.float64))
+            sum_y = np.bincount(inverse, weights=ys.astype(np.float64))
+            cx = sum_x / counts
+            cy = sum_y / counts
+
+            # packed RGB → 프로빈스 ID
+            rgb_to_id: dict[tuple[int, int, int], int] = {
+                p.rgb: p.id for p in self.provinces
+            }
+            out: dict[int, list[int]] = {}
+            for i, pk in enumerate(unique_packed.tolist()):
+                r = (pk >> 16) & 0xFF
+                g = (pk >> 8) & 0xFF
+                b = pk & 0xFF
+                pid = rgb_to_id.get((r, g, b))
+                if pid is None:
+                    continue
+                out[pid] = [int(round(cx[i])), int(round(cy[i]))]
+            return {"ok": True, "centroids": out}
+        except Exception as exc:
+            traceback.print_exc()
+            return {"ok": False, "error": str(exc), "trace": traceback.format_exc()}
+
+    def get_province_rgb(self, province_id: int) -> dict:
+        """프로빈스 ID로 RGB 조회 (캔버스 마스크 색칠용)."""
+        if self.provinces is None:
+            return {"ok": False, "error": "맵이 로드되지 않았습니다."}
+        try:
+            for p in self.provinces:
+                if p.id == int(province_id):
+                    return {"ok": True, "rgb": [p.r, p.g, p.b]}
+            return {"ok": False, "error": f"ID {province_id} 없음"}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def pick_through_province(self, from_id: int, to_id: int) -> dict:
+        """From과 To 사이의 선분이 지나가는 물(sea/lake) 프로빈스 중 가장 길게 통과한 ID.
+
+        알고리즘:
+          1) 두 프로빈스의 centroid를 구해 그 사이 선분을 따라 균등 샘플링.
+          2) 각 샘플 픽셀의 RGB → province type 매핑.
+          3) From/To 제외, type in {sea, lake} 만 카운트해 1위 반환.
+          4) 후보 없으면 through=-1 로 폴백.
+
+        반환: {ok, through: int (또는 -1), via: 'sea'|'lake'|None, candidates: [...]}
+        """
+        if self.provinces_arr is None or self.provinces is None:
+            return {"ok": False, "error": "맵이 로드되지 않았습니다."}
+        try:
+            arr = self.provinces_arr
+            h, w = arr.shape[:2]
+            by_id: dict[int, "Province"] = {p.id: p for p in self.provinces}
+            by_rgb: dict[tuple[int, int, int], "Province"] = {p.rgb: p for p in self.provinces}
+
+            f_id, t_id = int(from_id), int(to_id)
+            if f_id not in by_id or t_id not in by_id:
+                return {"ok": False, "error": "프로빈스 ID 없음"}
+            if f_id == t_id:
+                return {"ok": False, "error": "From과 To가 같습니다."}
+
+            # 두 프로빈스의 centroid (간단 계산: 해당 RGB 픽셀의 평균 좌표)
+            def centroid_of(p):
+                mask = (arr[..., 0] == p.r) & (arr[..., 1] == p.g) & (arr[..., 2] == p.b)
+                if not mask.any():
+                    return None
+                ys, xs = np.where(mask)
+                return (float(xs.mean()), float(ys.mean()))
+
+            c1 = centroid_of(by_id[f_id])
+            c2 = centroid_of(by_id[t_id])
+            if c1 is None or c2 is None:
+                return {"ok": True, "through": -1, "via": None, "candidates": []}
+
+            # 선분 따라 균등 샘플 — 거리에 비례한 점 개수(최소 64, 최대 2000)
+            dx = c2[0] - c1[0]
+            dy = c2[1] - c1[1]
+            dist = float(np.hypot(dx, dy))
+            n_samples = int(max(64, min(2000, round(dist * 2))))
+            ts = np.linspace(0.0, 1.0, n_samples)
+            xs = np.clip(np.round(c1[0] + dx * ts).astype(np.int64), 0, w - 1)
+            ys = np.clip(np.round(c1[1] + dy * ts).astype(np.int64), 0, h - 1)
+            samples = arr[ys, xs]   # (n_samples, 3)
+
+            # 픽셀 RGB → 24bit packed → unique count
+            packed = (samples[..., 0].astype(np.int64) << 16) | (samples[..., 1].astype(np.int64) << 8) | samples[..., 2].astype(np.int64)
+            unique, counts = np.unique(packed, return_counts=True)
+
+            # 빈도 내림차순으로 sea/lake 후보 추출 (From/To는 제외)
+            order = np.argsort(-counts)
+            candidates: list[dict] = []
+            best_id = -1
+            best_via = None
+            for i in order.tolist():
+                pk = int(unique[i])
+                rgb = ((pk >> 16) & 0xFF, (pk >> 8) & 0xFF, pk & 0xFF)
+                prov = by_rgb.get(rgb)
+                if prov is None:
+                    continue
+                if prov.id == f_id or prov.id == t_id:
+                    continue
+                if prov.type not in ("sea", "lake"):
+                    continue
+                candidates.append({"id": prov.id, "type": prov.type, "pixels": int(counts[i])})
+                if best_id == -1:
+                    best_id = prov.id
+                    best_via = prov.type
+            return {
+                "ok": True,
+                "through": best_id,
+                "via": best_via,
+                "candidates": candidates[:10],
             }
         except Exception as exc:
             traceback.print_exc()
