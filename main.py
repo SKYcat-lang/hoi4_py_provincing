@@ -29,6 +29,7 @@ from core.map_loader import (
     load_continent_txt,
     load_definition_csv,
     load_heightmap_bmp,
+    load_graphical_terrain_index_names,
     load_provinces_bmp,
     load_rivers_bmp,
     load_rivers_palette,
@@ -43,7 +44,6 @@ from core.map_loader import (
 from core.map_saver import (
     analyze_for_save,
     build_new_provinces,
-    pick_strategic_region_for_province,
     update_state_file,
     update_strategic_region_file,
     write_definition_csv,
@@ -56,6 +56,29 @@ from core.map_saver import (
     write_terrain_bmp,
 )
 from core.normal_map import generate_world_normal as build_world_normal
+from core.area_assignments import (
+    area_file_changes,
+    build_area_assignments,
+    pick_neighbor_area_id,
+    update_area_assignment,
+)
+from core.support_editors import (
+    apply_terrain_changes as apply_terrain_buffer_changes,
+    apply_terrain_stroke as apply_terrain_buffer_stroke,
+    apply_heightmap_changes as apply_heightmap_buffer_changes,
+    apply_river_changes as apply_river_buffer_changes,
+    delete_supply_railway as delete_supply_railway_buffer,
+    fill_scalar_layer_in_province,
+    flood_fill_rgb_connected,
+    flood_fill_terrain as flood_fill_terrain_buffer,
+    insert_supply_railway as insert_supply_railway_buffer,
+    normalize_supply_network,
+    protected_province_colors,
+    province_color_at,
+    smooth_heightmap_coast as smooth_heightmap_coast_buffer,
+    validate_river_topology as validate_river_buffer,
+    validate_supply_network as validate_supply_buffer,
+)
 from core.province_analyzer import find_adjacent_colors
 from core.xcrossing import find_all_xcrossings, find_xcrossings_near
 from core.validators import (
@@ -141,12 +164,15 @@ class Api:
         self.supply_dirty = False
         self.provinces: list[Province] = []
         self.terrain_categories: list[TerrainCategory] = []
+        self.terrain_index_names: dict[int, str] = {}
         self.continents: list[str] = []
         self.states: list[StateInfo] = []
         self.regions: list[StrategicRegionInfo] = []
         self.color_pool: Optional[ColorPool] = None
         # province_id -> state_id 매핑 (사용자가 스테이트 맵에서 편집)
         self.assignments: dict[int, int] = {}
+        # province_id -> strategic_region_id 매핑
+        self.region_assignments: dict[int, int] = {}
         # 새 RGB가 어느 RGB(들)을 잡아먹고 생겨났는지 카운트.
         # key=새 RGB tuple, value={옛 RGB tuple: 픽셀 수}
         # 저장 시 가장 많이 잡아먹은 옛 RGB의 부모 프로빈스로부터 region/state 상속.
@@ -199,16 +225,17 @@ class Api:
                 self.provinces = load_definition_csv(paths.definition_csv)
                 self.continents = load_continent_txt(paths.continent_txt)
                 self.terrain_categories = load_terrain_categories(paths.common_terrain_dir)
+                self.terrain_index_names = load_graphical_terrain_index_names(
+                    paths.common_terrain_dir
+                )
                 self.states = load_state_files(paths.history_states_dir)
                 self.regions = load_strategic_regions(paths.strategicregions_dir)
 
                 self.color_pool = ColorPool(p.rgb for p in self.provinces)
 
                 # 초기 스테이트 할당: 기존 state 파일에서 가져옴
-                self.assignments = {}
-                for s in self.states:
-                    for pid in s.province_ids:
-                        self.assignments[pid] = s.id
+                self.assignments = build_area_assignments(self.states)
+                self.region_assignments = build_area_assignments(self.regions)
 
                 # 부모 추적 카운터 초기화
                 self.parent_pixel_counts = {}
@@ -239,11 +266,7 @@ class Api:
                 terrain_palette_entries = []
                 if terrain_editable and self.terrain_palette is not None:
                     for index, color in enumerate(self.terrain_palette):
-                        category_name = (
-                            self.terrain_categories[index].name
-                            if index < len(self.terrain_categories)
-                            else None
-                        )
+                        category_name = self.terrain_index_names.get(index)
                         terrain_palette_entries.append({
                             "index": index,
                             "rgb": color,
@@ -282,6 +305,7 @@ class Api:
                     "worldNormalAvailable": os.path.isfile(paths.world_normal_bmp),
                     "worldNormalStale": self.world_normal_stale,
                     "riversEditable": rivers_editable,
+                    "riversPalette": self.rivers_palette if rivers_editable else [],
                     "riversIndexDataUrl": (
                         encode_image_to_png_base64(self.rivers_arr)
                         if rivers_editable else None
@@ -314,8 +338,17 @@ class Api:
                         [list(p.rgb), p.id] for p in self.provinces
                     ],
                     "regions": [
-                        {"id": r.id, "name": r.name}
+                        {
+                            "id": r.id,
+                            "name": r.name,
+                            "color": list(_state_color_from_id(r.id)),
+                            "provinceCount": len(r.province_ids),
+                        }
                         for r in self.regions
+                    ],
+                    "regionAssignments": [
+                        [pid, region_id]
+                        for pid, region_id in self.region_assignments.items()
                     ],
                     "continents": self.continents,
                     "terrainCategoryNames": [c.name for c in self.terrain_categories if not c.is_water],
@@ -495,22 +528,13 @@ class Api:
         if error:
             return {"ok": False, "error": error}
 
-        index = int(terrain_index)
-        if not 0 <= index <= 255:
-            return {"ok": False, "error": "지형 팔레트 인덱스가 범위를 벗어났습니다."}
-
-        arr = self.terrain_arr
-        assert arr is not None
-        height, width = arr.shape
-        applied = 0
-        for pixel in pixels:
-            x, y = int(pixel[0]), int(pixel[1])
-            if not (0 <= x < width and 0 <= y < height):
-                continue
-            if int(arr[y, x]) == index:
-                continue
-            arr[y, x] = index
-            applied += 1
+        assert self.terrain_arr is not None
+        try:
+            applied = apply_terrain_buffer_stroke(
+                self.terrain_arr, pixels, terrain_index
+            )
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
         if applied:
             self.terrain_dirty = True
         return {"ok": True, "applied": applied}
@@ -521,67 +545,27 @@ class Api:
         if error:
             return {"ok": False, "error": error}
 
-        arr = self.terrain_arr
-        assert arr is not None
-        height, width = arr.shape
-        applied = 0
-        for change in changes:
-            if len(change) < 3:
-                continue
-            x, y, index = int(change[0]), int(change[1]), int(change[2])
-            if not (0 <= x < width and 0 <= y < height and 0 <= index <= 255):
-                continue
-            if int(arr[y, x]) == index:
-                continue
-            arr[y, x] = index
-            applied += 1
+        assert self.terrain_arr is not None
+        applied = apply_terrain_buffer_changes(self.terrain_arr, changes)
         if applied:
             self.terrain_dirty = True
         return {"ok": True, "applied": applied}
 
     def flood_fill_terrain(self, x: int, y: int, terrain_index: int) -> dict:
-        """Fill one connected indexed-terrain region and return undo values."""
+        """Fill terrain.bmp inside the clicked province boundary."""
         error = self._terrain_edit_error()
         if error:
             return {"ok": False, "error": error}
+        if self.provinces_arr is None:
+            return {"ok": False, "error": "provinces.bmp가 로드되지 않았습니다."}
 
-        arr = self.terrain_arr
-        assert arr is not None
-        height, width = arr.shape
-        x, y, new_index = int(x), int(y), int(terrain_index)
-        if not (0 <= x < width and 0 <= y < height):
-            return {"ok": False, "error": "범위 밖 좌표입니다."}
-        if not 0 <= new_index <= 255:
-            return {"ok": False, "error": "지형 팔레트 인덱스가 범위를 벗어났습니다."}
-
-        target = int(arr[y, x])
-        if target == new_index:
-            return {"ok": True, "changedPixels": [], "applied": 0}
-
-        mask_eq = arr == target
-        visited = np.zeros_like(mask_eq, dtype=bool)
-        from collections import deque
-        queue: deque[tuple[int, int]] = deque([(x, y)])
-        visited[y, x] = True
-        changed_pixels: list[list[int]] = []
-
-        while queue:
-            cx, cy = queue.popleft()
-            arr[cy, cx] = new_index
-            changed_pixels.append([cx, cy, target])
-
-            if cx > 0 and mask_eq[cy, cx - 1] and not visited[cy, cx - 1]:
-                visited[cy, cx - 1] = True
-                queue.append((cx - 1, cy))
-            if cx + 1 < width and mask_eq[cy, cx + 1] and not visited[cy, cx + 1]:
-                visited[cy, cx + 1] = True
-                queue.append((cx + 1, cy))
-            if cy > 0 and mask_eq[cy - 1, cx] and not visited[cy - 1, cx]:
-                visited[cy - 1, cx] = True
-                queue.append((cx, cy - 1))
-            if cy + 1 < height and mask_eq[cy + 1, cx] and not visited[cy + 1, cx]:
-                visited[cy + 1, cx] = True
-                queue.append((cx, cy + 1))
+        assert self.terrain_arr is not None
+        try:
+            changed_pixels = flood_fill_terrain_buffer(
+                self.provinces_arr, self.terrain_arr, x, y, terrain_index
+            )
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
 
         self.terrain_dirty = bool(changed_pixels) or self.terrain_dirty
         return {
@@ -599,30 +583,108 @@ class Api:
             return "heightmap.bmp를 안전하게 편집할 수 없습니다."
         return None
 
-    def apply_heightmap_changes(self, changes: list[list[int]]) -> dict:
+    def apply_heightmap_changes(
+        self,
+        changes: list[list[int]],
+        respect_lakes: bool = False,
+        respect_sea: bool = False,
+    ) -> dict:
         """Apply exact ``[x, y, greyscale_value]`` height values."""
         error = self._heightmap_edit_error()
         if error:
             return {"ok": False, "error": error}
-        arr = self.heightmap_arr
-        assert arr is not None
-        height, width = arr.shape
-        applied = 0
-        for change in changes:
-            if len(change) < 3:
-                continue
-            x, y, value = int(change[0]), int(change[1]), int(change[2])
-            if not (0 <= x < width and 0 <= y < height):
-                continue
-            value = max(0, min(255, value))
-            if int(arr[y, x]) == value:
-                continue
-            arr[y, x] = value
-            applied += 1
+        assert self.heightmap_arr is not None
+        protected = protected_province_colors(
+            self.provinces, respect_lakes, respect_sea
+        )
+        try:
+            applied = apply_heightmap_buffer_changes(
+                self.heightmap_arr,
+                changes,
+                self.provinces_arr,
+                protected,
+            )
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
         if applied:
             self.heightmap_dirty = True
             self.world_normal_stale = True
         return {"ok": True, "applied": applied}
+
+    def fill_heightmap_province(
+        self,
+        x: int,
+        y: int,
+        value: int,
+        respect_lakes: bool = False,
+        respect_sea: bool = False,
+    ) -> dict:
+        """Fill heightmap.bmp inside one province, honoring water protection."""
+        error = self._heightmap_edit_error()
+        if error:
+            return {"ok": False, "error": error}
+        if self.provinces_arr is None:
+            return {"ok": False, "error": "provinces.bmp가 로드되지 않았습니다."}
+        assert self.heightmap_arr is not None
+        protected = protected_province_colors(
+            self.provinces, respect_lakes, respect_sea
+        )
+        try:
+            if province_color_at(self.provinces_arr, x, y) in protected:
+                return {
+                    "ok": True,
+                    "blockedByProtection": True,
+                    "changedPixels": [],
+                    "applied": 0,
+                }
+            changed_pixels = fill_scalar_layer_in_province(
+                self.provinces_arr, self.heightmap_arr, x, y, value
+            )
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        if changed_pixels:
+            self.heightmap_dirty = True
+            self.world_normal_stale = True
+        return {
+            "ok": True,
+            "changedPixels": changed_pixels,
+            "applied": len(changed_pixels),
+        }
+
+    def smooth_heightmap_coast(
+        self,
+        x: int,
+        y: int,
+        width: int = 12,
+        strength: int = 100,
+    ) -> dict:
+        """Smooth land-side height values along the clicked sea province."""
+        error = self._heightmap_edit_error()
+        if error:
+            return {"ok": False, "error": error}
+        if self.provinces_arr is None:
+            return {"ok": False, "error": "provinces.bmp가 로드되지 않았습니다."}
+        assert self.heightmap_arr is not None
+        try:
+            result = smooth_heightmap_coast_buffer(
+                self.provinces_arr,
+                self.heightmap_arr,
+                self.provinces,
+                x,
+                y,
+                width,
+                max(1, min(100, int(strength))) / 100.0,
+            )
+        except (TypeError, ValueError) as exc:
+            return {"ok": False, "error": str(exc)}
+        if result["changedPixels"]:
+            self.heightmap_dirty = True
+            self.world_normal_stale = True
+        return {
+            "ok": True,
+            "applied": len(result["changedPixels"]),
+            **result,
+        }
 
     def generate_world_normal(self) -> dict:
         """Generate and immediately write world_normal.bmp from live height data."""
@@ -662,95 +724,46 @@ class Api:
         error = self._rivers_edit_error()
         if error:
             return {"ok": False, "error": error}
-        arr = self.rivers_arr
-        assert arr is not None
-        height, width = arr.shape
-        allowed = set(range(12)) | {254, 255}
-        applied = 0
-        for change in changes:
-            if len(change) < 3:
-                continue
-            x, y, index = int(change[0]), int(change[1]), int(change[2])
-            if not (0 <= x < width and 0 <= y < height and index in allowed):
-                continue
-            if int(arr[y, x]) == index:
-                continue
-            arr[y, x] = index
-            applied += 1
+        assert self.rivers_arr is not None
+        applied = apply_river_buffer_changes(self.rivers_arr, changes)
         if applied:
             self.rivers_dirty = True
         return {"ok": True, "applied": applied}
+
+    def fill_rivers_province(self, x: int, y: int, river_index: int) -> dict:
+        """Fill rivers.bmp inside the clicked province boundary."""
+        error = self._rivers_edit_error()
+        if error:
+            return {"ok": False, "error": error}
+        if self.provinces_arr is None:
+            return {"ok": False, "error": "provinces.bmp가 로드되지 않았습니다."}
+        assert self.rivers_arr is not None
+        try:
+            changed_pixels = fill_scalar_layer_in_province(
+                self.provinces_arr,
+                self.rivers_arr,
+                x,
+                y,
+                river_index,
+                allowed_values=set(range(12)) | {254, 255},
+            )
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        if changed_pixels:
+            self.rivers_dirty = True
+        return {
+            "ok": True,
+            "changedPixels": changed_pixels,
+            "applied": len(changed_pixels),
+        }
 
     def validate_river_topology(self, max_issues: int = 200) -> dict:
         """Validate the structural rules used by HOI4's rivers.bmp."""
         error = self._rivers_edit_error()
         if error:
             return {"ok": False, "error": error}
-        from collections import deque
-
-        arr = self.rivers_arr
-        assert arr is not None
-        height, width = arr.shape
-        # 0..11 are interpreted as rivers. 12..255 are deliberately legal:
-        # the game ignores them and map authors commonly use those indices as
-        # comments (for example, land/sea guides).
-        issues: list[dict] = []
-
-        river = arr <= 11
-        visited = np.zeros_like(river, dtype=bool)
-        component_count = 0
-        source_count = 0
-        for start_y, start_x in zip(*np.where(river & ~visited)):
-            if visited[start_y, start_x]:
-                continue
-            component_count += 1
-            queue = deque([(int(start_x), int(start_y))])
-            visited[start_y, start_x] = True
-            component: list[tuple[int, int]] = []
-            sources: list[tuple[int, int]] = []
-            edge_count = 0
-            while queue:
-                x, y = queue.popleft()
-                component.append((x, y))
-                if int(arr[y, x]) == 0:
-                    sources.append((x, y))
-                for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
-                    if 0 <= nx < width and 0 <= ny < height and river[ny, nx]:
-                        edge_count += 1
-                        if not visited[ny, nx]:
-                            visited[ny, nx] = True
-                            queue.append((nx, ny))
-            edge_count //= 2
-            source_count += len(sources)
-            if len(sources) != 1 and len(issues) < max_issues:
-                x, y = component[0]
-                issues.append({
-                    "kind": "source_count", "x": x, "y": y,
-                    "count": len(sources), "pixels": len(component),
-                })
-            if edge_count >= len(component) and len(issues) < max_issues:
-                x, y = component[0]
-                issues.append({"kind": "cycle", "x": x, "y": y})
-
-        if height > 1 and width > 1:
-            blocks = (
-                river[:-1, :-1] & river[:-1, 1:] &
-                river[1:, :-1] & river[1:, 1:]
-            )
-            thick_y, thick_x = np.where(blocks)
-            for x, y in zip(thick_x, thick_y):
-                if len(issues) >= max_issues:
-                    break
-                issues.append({"kind": "thick_2x2", "x": int(x), "y": int(y)})
-
-        return {
-            "ok": True,
-            "valid": not issues,
-            "issues": issues,
-            "truncated": len(issues) >= max_issues,
-            "componentCount": component_count,
-            "sourceCount": source_count,
-        }
+        assert self.rivers_arr is not None
+        return validate_river_buffer(self.rivers_arr, max_issues)
 
     # -------- supply_nodes.txt / railways.txt 편집 ----------
 
@@ -763,85 +776,34 @@ class Api:
             return {"ok": False, "error": "맵이 로드되지 않았습니다."}
         nodes = self.supply_nodes if nodes is None else nodes
         railways = self.railways if railways is None else railways
-        by_id = {province.id: province for province in self.provinces}
-        live_colors = find_used_colors(self.provinces_arr)
-        issues: list[dict] = []
-
-        seen_nodes: set[int] = set()
-        for index, node in enumerate(nodes):
+        explicit_pairs: set[frozenset[int]] = set()
+        adjacency_path = self._adjacencies_csv_path()
+        if adjacency_path is not None:
             try:
-                level = int(node["level"])
-                province_id = int(node["province"])
-            except (KeyError, TypeError, ValueError):
-                issues.append({"kind": "invalid_node", "index": index})
-                continue
-            province = by_id.get(province_id)
-            if level != 1:
-                issues.append({"kind": "node_level", "index": index, "level": level})
-            if province is None or province.type != "land" or province.rgb not in live_colors:
-                issues.append({"kind": "invalid_node_province", "index": index,
-                               "province": province_id})
-            elif province_id not in self.assignments:
-                issues.append({"kind": "stateless_node", "index": index,
-                               "province": province_id})
-            if province_id in seen_nodes:
-                issues.append({"kind": "duplicate_node", "index": index,
-                               "province": province_id})
-            seen_nodes.add(province_id)
-
-        rail_ids = {
-            int(province_id)
-            for railway in railways
-            for province_id in railway.get("provinces", [])
-            if str(province_id).lstrip("-").isdigit()
-        }
-        target_rgbs = {by_id[pid].rgb for pid in rail_ids if pid in by_id}
-        color_adjacency = find_adjacent_colors(self.provinces_arr, target_rgbs)
-        id_by_rgb = {province.rgb: province.id for province in self.provinces}
-        id_adjacency = {
-            id_by_rgb[rgb]: {id_by_rgb[n] for n in neighbours if n in id_by_rgb}
-            for rgb, neighbours in color_adjacency.items() if rgb in id_by_rgb
-        }
-
-        for index, railway in enumerate(railways):
-            try:
-                level = int(railway["level"])
-                province_ids = [int(value) for value in railway["provinces"]]
-            except (KeyError, TypeError, ValueError):
-                issues.append({"kind": "invalid_railway", "index": index})
-                continue
-            if not 1 <= level <= 5:
-                issues.append({"kind": "railway_level", "index": index,
-                               "level": level})
-            if len(province_ids) < 2:
-                issues.append({"kind": "railway_too_short", "index": index})
-            for province_id in province_ids:
-                province = by_id.get(province_id)
-                if province is None or province.type != "land" or province.rgb not in live_colors:
-                    issues.append({"kind": "invalid_railway_province", "index": index,
-                                   "province": province_id})
-                elif province_id not in self.assignments:
-                    issues.append({"kind": "stateless_railway", "index": index,
-                                   "province": province_id})
-            for start, end in zip(province_ids, province_ids[1:]):
-                if end not in id_adjacency.get(start, set()):
-                    issues.append({"kind": "disjointed_railway", "index": index,
-                                   "from": start, "to": end})
-
-        return {"ok": True, "valid": not issues, "issues": issues}
+                explicit_pairs = {
+                    frozenset((adjacency.from_id, adjacency.to_id))
+                    for adjacency in load_adjacencies(adjacency_path).items
+                    if adjacency.type != "impassable"
+                }
+            except (OSError, ValueError):
+                # Pixel-border validation remains available even if the
+                # optional adjacency file cannot be read.
+                explicit_pairs = set()
+        return validate_supply_buffer(
+            self.provinces_arr,
+            self.provinces,
+            self.assignments,
+            nodes,
+            railways,
+            explicit_pairs,
+        )
 
     def update_supply_network(self, nodes: list[dict], railways: list[dict]) -> dict:
         """Replace the in-memory supply network after full validation."""
         try:
-            normalized_nodes = [
-                {"level": int(node["level"]), "province": int(node["province"])}
-                for node in nodes
-            ]
-            normalized_railways = [
-                {"level": int(railway["level"]),
-                 "provinces": [int(value) for value in railway["provinces"]]}
-                for railway in railways
-            ]
+            normalized_nodes, normalized_railways = normalize_supply_network(
+                nodes, railways
+            )
         except (KeyError, TypeError, ValueError) as exc:
             return {"ok": False, "valid": False, "error": f"보급망 입력 형식 오류: {exc}"}
         validation = self.validate_supply_network(normalized_nodes, normalized_railways)
@@ -852,7 +814,150 @@ class Api:
         self.supply_dirty = True
         return {"ok": True, "valid": True,
                 "nodeCount": len(normalized_nodes),
-                "railwayCount": len(normalized_railways)}
+                "railwayCount": len(normalized_railways),
+                "warnings": validation.get("warnings", [])}
+
+    def add_supply_node(self, province_id: int) -> dict:
+        """Add one hub without revalidating unrelated legacy railways."""
+        try:
+            province_id = int(province_id)
+        except (TypeError, ValueError) as exc:
+            return {"ok": False, "error": f"잘못된 프로빈스 ID입니다: {exc}"}
+        if any(node.get("province") == province_id for node in self.supply_nodes):
+            return {"ok": False, "error": "이 프로빈스에는 이미 보급 허브가 있습니다."}
+        candidate = {"level": 1, "province": province_id}
+        validation = self.validate_supply_network([candidate], [])
+        if not validation.get("valid", False):
+            return validation
+        self.supply_nodes.append(candidate)
+        self.supply_dirty = True
+        return {"ok": True, "node": candidate}
+
+    def delete_supply_node(self, province_id: int) -> dict:
+        """Delete exactly one hub without validating unrelated records."""
+        try:
+            province_id = int(province_id)
+        except (TypeError, ValueError) as exc:
+            return {"ok": False, "error": f"잘못된 프로빈스 ID입니다: {exc}"}
+        index = next((
+            index for index, node in enumerate(self.supply_nodes)
+            if int(node.get("province", -1)) == province_id
+        ), None)
+        if index is None:
+            return {"ok": False, "error": "이 프로빈스에는 삭제할 보급 허브가 없습니다."}
+        removed = self.supply_nodes.pop(index)
+        self.supply_dirty = True
+        return {"ok": True, "deletedIndex": index, "node": removed}
+
+    def insert_supply_node(self, node_index: int, node: dict) -> dict:
+        """Restore one exact hub at its list position for undo."""
+        try:
+            index = int(node_index)
+            restored = {
+                "level": int(node["level"]),
+                "province": int(node["province"]),
+            }
+        except (KeyError, TypeError, ValueError) as exc:
+            return {"ok": False, "error": f"복원할 보급 허브 데이터가 잘못되었습니다: {exc}"}
+        if not 0 <= index <= len(self.supply_nodes):
+            return {"ok": False, "error": "복원할 보급 허브 위치가 범위를 벗어났습니다."}
+        self.supply_nodes.insert(index, restored)
+        self.supply_dirty = True
+        return {"ok": True, "insertedIndex": index, "node": restored}
+
+    def upsert_supply_railway(
+        self, railway_index: Optional[int], railway: dict
+    ) -> dict:
+        """Create or replace one railway, isolating unrelated file defects."""
+        try:
+            _, normalized = normalize_supply_network([], [railway])
+            candidate = normalized[0]
+        except (KeyError, TypeError, ValueError) as exc:
+            return {"ok": False, "valid": False,
+                    "error": f"철도 입력 형식 오류: {exc}"}
+
+        creating = railway_index is None
+        if creating:
+            index = len(self.railways)
+        else:
+            try:
+                index = int(railway_index)
+            except (TypeError, ValueError) as exc:
+                return {"ok": False, "error": f"잘못된 철도 인덱스입니다: {exc}"}
+            if not 0 <= index < len(self.railways):
+                return {"ok": False, "error": "편집할 철도 인덱스가 범위를 벗어났습니다."}
+
+        validation = self.validate_supply_network([], [candidate])
+        if not validation.get("valid", False):
+            return validation
+        warnings = [
+            {**warning, "index": index}
+            for warning in validation.get("warnings", [])
+        ]
+        previous = None
+        if creating:
+            self.railways.append(candidate)
+        else:
+            previous = {
+                "level": int(self.railways[index]["level"]),
+                "provinces": [int(value) for value in self.railways[index]["provinces"]],
+            }
+            self.railways[index] = candidate
+        self.supply_dirty = True
+        return {
+            "ok": True,
+            "valid": True,
+            "index": index,
+            "created": creating,
+            "railway": candidate,
+            "previousRailway": previous,
+            "warnings": warnings,
+        }
+
+    def replace_supply_railway(self, railway_index: int, railway: dict) -> dict:
+        """Restore one exact railway in place for undo/redo."""
+        try:
+            index = int(railway_index)
+            _, normalized = normalize_supply_network([], [railway])
+        except (KeyError, TypeError, ValueError) as exc:
+            return {"ok": False, "error": f"복원할 철도 데이터가 잘못되었습니다: {exc}"}
+        if not 0 <= index < len(self.railways):
+            return {"ok": False, "error": "복원할 철도 인덱스가 범위를 벗어났습니다."}
+        self.railways[index] = normalized[0]
+        self.supply_dirty = True
+        return {"ok": True, "index": index, "railway": normalized[0]}
+
+    def delete_supply_railway(self, railway_index: int) -> dict:
+        """Delete one railway immediately; remaining records are untouched."""
+        try:
+            removed = delete_supply_railway_buffer(
+                self.railways, railway_index
+            )
+        except (TypeError, ValueError) as exc:
+            return {"ok": False, "error": str(exc)}
+        self.supply_dirty = True
+        return {
+            "ok": True,
+            "deletedIndex": int(railway_index),
+            "deletedRailway": removed,
+            "railwayCount": len(self.railways),
+        }
+
+    def insert_supply_railway(self, railway_index: int, railway: dict) -> dict:
+        """Restore a deleted railway for undo without validating other rails."""
+        try:
+            restored = insert_supply_railway_buffer(
+                self.railways, railway_index, railway
+            )
+        except (TypeError, ValueError) as exc:
+            return {"ok": False, "error": str(exc)}
+        self.supply_dirty = True
+        return {
+            "ok": True,
+            "insertedIndex": int(railway_index),
+            "railway": restored,
+            "railwayCount": len(self.railways),
+        }
 
     # -------- 외부 BMP 덮어쓰기 ----------
 
@@ -1092,24 +1197,49 @@ class Api:
             "rgb": list(rgb),
             "provinceId": (prov.id if prov else None),
             "stateId": (self.assignments.get(prov.id) if prov else None),
+            "strategicRegionId": (
+                self.region_assignments.get(prov.id) if prov else None
+            ),
         }
 
     def assign_province_to_state(self, province_id: int, state_id: Optional[int]) -> dict:
         """프로빈스의 스테이트 소속 갱신. state_id=None이면 미할당으로."""
-        if not isinstance(province_id, int):
-            return {"ok": False, "error": "잘못된 province_id"}
-        prev_state_id = self.assignments.get(province_id)
-        if state_id is None:
-            self.assignments.pop(province_id, None)
-        else:
-            if not any(s.id == state_id for s in self.states):
-                return {"ok": False, "error": f"존재하지 않는 state_id: {state_id}"}
-            self.assignments[province_id] = state_id
+        try:
+            prev_state_id = update_area_assignment(
+                self.assignments,
+                province_id,
+                state_id,
+                (state.id for state in self.states),
+                "스테이트",
+            )
+        except (TypeError, ValueError) as exc:
+            return {"ok": False, "error": str(exc)}
         return {
             "ok": True,
             "provinceId": province_id,
             "previousStateId": prev_state_id,
             "stateId": state_id,
+        }
+
+    def assign_province_to_strategic_region(
+        self, province_id: int, region_id: Optional[int]
+    ) -> dict:
+        """프로빈스의 전략구역 소속을 갱신하거나 해제한다."""
+        try:
+            previous_region_id = update_area_assignment(
+                self.region_assignments,
+                province_id,
+                region_id,
+                (region.id for region in self.regions),
+                "전략구역",
+            )
+        except (TypeError, ValueError) as exc:
+            return {"ok": False, "error": str(exc)}
+        return {
+            "ok": True,
+            "provinceId": province_id,
+            "previousStrategicRegionId": previous_region_id,
+            "strategicRegionId": region_id,
         }
 
     def list_assignments(self) -> dict:
@@ -1123,7 +1253,7 @@ class Api:
 
     def flood_fill(self, x: int, y: int, rgb: list[int],
                    respect_lakes: bool, respect_sea: bool) -> dict:
-        """페인트통: (x,y)에서 시작해 4방향으로 연결된 같은 색 영역을 새 색으로 칠한다.
+        """클릭 지점과 4방향으로 연결된 같은 RGB 영역만 새 색으로 칠한다.
 
         호수/바다 보호 토글이 켜져 있고 시작 픽셀이 보호 대상이면 아무것도 하지 않는다.
 
@@ -1133,69 +1263,29 @@ class Api:
         if self.provinces_arr is None:
             return {"ok": False, "error": "맵이 로드되지 않았습니다."}
 
-        arr = self.provinces_arr
-        height, width = arr.shape[:2]
-        if not (0 <= x < width and 0 <= y < height):
-            return {"ok": False, "error": "범위 밖"}
-
-        target = tuple(int(c) for c in arr[y, x].tolist())
-        new_color = (int(rgb[0]), int(rgb[1]), int(rgb[2]))
+        try:
+            target = province_color_at(self.provinces_arr, x, y)
+            new_color = (int(rgb[0]), int(rgb[1]), int(rgb[2]))
+        except (IndexError, TypeError, ValueError) as exc:
+            return {"ok": False, "error": str(exc)}
         if target == new_color:
             return {"ok": True, "changedPixels": [], "applied": 0, "skipped": 0}
 
-        # 보호 토글: 시작 픽셀이 보호 대상이면 즉시 종료
-        protected: set[tuple[int, int, int]] = set()
-        if respect_lakes:
-            protected.update(p.rgb for p in self.provinces if p.type == "lake")
-        if respect_sea:
-            protected.update(p.rgb for p in self.provinces if p.type == "sea")
+        protected = protected_province_colors(
+            self.provinces, respect_lakes, respect_sea
+        )
         if target in protected:
             return {
                 "ok": True, "changedPixels": [], "applied": 0, "skipped": 1,
                 "blockedByProtection": True,
             }
 
-        # NumPy 기반 빠른 flood fill: 같은 색 마스크 → connected components
-        # SciPy 없이 BFS로 처리. 5632×2048에서도 보통 영역은 빠르다.
-        mask_eq = (
-            (arr[..., 0] == target[0])
-            & (arr[..., 1] == target[1])
-            & (arr[..., 2] == target[2])
-        )
-
-        visited = np.zeros_like(mask_eq, dtype=bool)
-        changed_pixels: list[list[int]] = []
-
-        # 반복형 BFS (재귀는 큰 영역에서 스택 오버플로 위험)
-        from collections import deque
-        q: deque[tuple[int, int]] = deque()
-        q.append((x, y))
-        visited[y, x] = True
-
-        nr, ng, nb = new_color
-        tr, tg, tb = target
-
-        while q:
-            cx, cy = q.popleft()
-            # 픽셀 색 변경 + 변경 기록 (Undo용)
-            arr[cy, cx, 0] = nr
-            arr[cy, cx, 1] = ng
-            arr[cy, cx, 2] = nb
-            changed_pixels.append([cx, cy, tr, tg, tb])
-
-            # 4방향
-            if cx > 0 and mask_eq[cy, cx - 1] and not visited[cy, cx - 1]:
-                visited[cy, cx - 1] = True
-                q.append((cx - 1, cy))
-            if cx + 1 < width and mask_eq[cy, cx + 1] and not visited[cy, cx + 1]:
-                visited[cy, cx + 1] = True
-                q.append((cx + 1, cy))
-            if cy > 0 and mask_eq[cy - 1, cx] and not visited[cy - 1, cx]:
-                visited[cy - 1, cx] = True
-                q.append((cx, cy - 1))
-            if cy + 1 < height and mask_eq[cy + 1, cx] and not visited[cy + 1, cx]:
-                visited[cy + 1, cx] = True
-                q.append((cx, cy + 1))
+        try:
+            _, changed_pixels = flood_fill_rgb_connected(
+                self.provinces_arr, x, y, new_color
+            )
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
 
         # 사용된 색으로 등록
         if self.color_pool is not None:
@@ -1654,57 +1744,42 @@ class Api:
 
             # self.assignments 전체를 기준으로 각 state 파일을 재구성
             # state별 현재 매핑 → 비교해서 (추가/제거) 산출
-            assignments_by_state: dict[int, set[int]] = {}
-            for pid, sid in self.assignments.items():
-                if pid in removed_ids:
-                    continue
-                assignments_by_state.setdefault(sid, set()).add(pid)
-
             for state in self.states:
-                desired = assignments_by_state.get(state.id, set())
-                current = set(state.province_ids)
-                add = sorted(desired - current)
-                # 제거 = 현재 파일에 있지만 매핑에 더는 이 state로 없는 것
-                # 또는 사라진 프로빈스
-                remove = (current - desired) | (current & removed_ids)
+                add, remove = area_file_changes(
+                    state, self.assignments, removed_ids
+                )
                 if add or remove:
                     changed = update_state_file(state, add, remove)
                     if changed:
                         modified_state_files.append(state.file_path)
 
-            # 전략구역 자동 할당: 부모 기반 우선, 없으면 인접 기반 폴백
-            # (가희 요청: 새 프로빈스는 기존 색상에서 분할되었을 것이므로 부모의 region을 상속)
-            region_by_pid: dict[int, StrategicRegionInfo] = {}
-            for r in self.regions:
-                for pid in r.province_ids:
-                    region_by_pid[pid] = r
-
+            # 새 프로빈스의 전략구역은 부모 기반 우선, 인접 기반 폴백으로 상속한다.
+            # 기존 프로빈스는 편집기에서 만든 region_assignments를 그대로 보존한다.
             for p in new_provs:
                 if p.type not in ("land", "sea", "lake"):
                     continue
-                region = None
-
-                # 1) 부모 기반 상속
+                region_id = None
                 parent = _resolve_parent(p.rgb)
                 if parent is not None:
-                    region = region_by_pid.get(parent.id)
+                    region_id = self.region_assignments.get(parent.id)
 
-                # 2) 인접 기반 폴백
-                if region is None:
-                    region = pick_strategic_region_for_province(
-                        p.rgb, p.id, adjacency, province_by_rgb, self.regions
+                if region_id is None:
+                    region_id = pick_neighbor_area_id(
+                        p.rgb,
+                        adjacency,
+                        province_by_rgb,
+                        self.region_assignments,
                     )
+                if region_id is not None:
+                    self.region_assignments[p.id] = region_id
 
-                if region is None:
-                    continue
-                changed = update_strategic_region_file(region, [p.id], set())
-                if changed and region.file_path not in modified_region_files:
-                    modified_region_files.append(region.file_path)
-
-            # 사라진 프로빈스는 모든 전략구역에서도 제거
-            if removed_ids:
-                for region in self.regions:
-                    changed = update_strategic_region_file(region, [], removed_ids)
+            # 수동 이동·할당 해제와 신규 상속 결과를 모든 전략구역 파일에 동기화한다.
+            for region in self.regions:
+                add, remove = area_file_changes(
+                    region, self.region_assignments, removed_ids
+                )
+                if add or remove:
+                    changed = update_strategic_region_file(region, add, remove)
                     if changed and region.file_path not in modified_region_files:
                         modified_region_files.append(region.file_path)
 
@@ -1786,6 +1861,16 @@ class Api:
                 "removedProvinceCount": len(removed_ids),
                 "modifiedStateFiles": modified_state_files,
                 "modifiedRegionFiles": modified_region_files,
+                "assignments": [
+                    [pid, state_id]
+                    for pid, state_id in self.assignments.items()
+                    if pid not in removed_ids
+                ],
+                "regionAssignments": [
+                    [pid, region_id]
+                    for pid, region_id in self.region_assignments.items()
+                    if pid not in removed_ids
+                ],
                 "modifiedExternalFiles": external_summary.get("modifiedFiles", []),
                 "externalSummary": external_summary,
                 "liveProvinceCount": live_count,

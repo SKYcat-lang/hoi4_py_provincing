@@ -50,6 +50,9 @@ def find_adjacent_colors(
     """
     packed = rgb_to_int(provinces_arr)  # (H, W) int32
     target_packed = {(int(r) << 16) | (int(g) << 8) | int(b) for r, g, b in target_rgbs}
+    if not target_packed:
+        return {}
+    target_values = np.fromiter(target_packed, dtype=np.int32)
 
     adjacency: dict[int, set[int]] = defaultdict(set)
 
@@ -60,6 +63,9 @@ def find_adjacent_colors(
     if diff_mask.any():
         a = left[diff_mask]
         b = right[diff_mask]
+        relevant = np.isin(a, target_values) | np.isin(b, target_values)
+        a = a[relevant]
+        b = b[relevant]
         for av, bv in zip(a.tolist(), b.tolist()):
             if av in target_packed:
                 adjacency[av].add(bv)
@@ -73,6 +79,9 @@ def find_adjacent_colors(
     if diff_mask.any():
         a = top[diff_mask]
         b = bottom[diff_mask]
+        relevant = np.isin(a, target_values) | np.isin(b, target_values)
+        a = a[relevant]
+        b = b[relevant]
         for av, bv in zip(a.tolist(), b.tolist()):
             if av in target_packed:
                 adjacency[av].add(bv)

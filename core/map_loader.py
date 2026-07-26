@@ -319,6 +319,43 @@ def load_terrain_categories(common_terrain_dir: str) -> list[TerrainCategory]:
     return categories
 
 
+def load_graphical_terrain_index_names(common_terrain_dir: str) -> dict[int, str]:
+    """Map terrain.bmp palette indices to graphical terrain ``type`` names."""
+    if not os.path.isdir(common_terrain_dir):
+        return {}
+    names_by_index: dict[int, list[str]] = {}
+    for filename in sorted(os.listdir(common_terrain_dir)):
+        if not filename.endswith(".txt"):
+            continue
+        text = re.sub(
+            r"#.*", "", _read_text(os.path.join(common_terrain_dir, filename))
+        )
+        for top_name, top_body in _iter_top_level_blocks(text):
+            if top_name != "terrain":
+                continue
+            for _, rule_body in _iter_top_level_blocks(top_body):
+                type_match = re.search(
+                    r"\btype\s*=\s*([A-Za-z_][A-Za-z0-9_]*)", rule_body
+                )
+                color_match = re.search(
+                    r"\bcolor\s*=\s*\{([^}]*)\}", rule_body, re.DOTALL
+                )
+                if not type_match or not color_match:
+                    continue
+                terrain_name = type_match.group(1)
+                for raw_index in re.findall(r"\d+", color_match.group(1)):
+                    index = int(raw_index)
+                    if not 0 <= index <= 255:
+                        continue
+                    bucket = names_by_index.setdefault(index, [])
+                    if terrain_name not in bucket:
+                        bucket.append(terrain_name)
+    return {
+        index: " / ".join(names)
+        for index, names in names_by_index.items()
+    }
+
+
 def load_state_files(states_dir: str) -> list[StateInfo]:
     """history/states/*.txt 파일들을 가볍게 파싱."""
     if not os.path.isdir(states_dir):

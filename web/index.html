@@ -43,14 +43,7 @@
         </svg>
         <span>프로빈스 편집</span>
       </button>
-      <button id="tab-state" class="tab-btn" title="스테이트 할당 (2)">
-        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M3 21h18M5 21V11l7-5 7 5v10"/>
-          <path d="M9 21v-6h6v6"/>
-        </svg>
-        <span>스테이트 할당</span>
-      </button>
-      <button id="tab-split" class="tab-btn" title="자동 분할 (3)">
+      <button id="tab-split" class="tab-btn" title="자동 분할 (2)">
         <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
           <path d="M12 3v18M3 12h18"/>
           <circle cx="6" cy="6" r="2"/>
@@ -60,14 +53,22 @@
         </svg>
         <span>자동 분할</span>
       </button>
-      <button id="tab-adjacency" class="tab-btn" title="인접 연결 (4) — adjacencies.csv 편집">
-        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
-          <circle cx="5" cy="12" r="2.5"/>
-          <circle cx="19" cy="12" r="2.5"/>
-          <path d="M7.5 12 H 16.5" stroke-dasharray="2 2"/>
-        </svg>
-        <span>인접 연결</span>
-      </button>
+      <span class="area-tab-group" role="group" aria-label="영역 할당 편집기">
+        <button id="tab-state" class="tab-btn" title="스테이트 할당 (3)">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M3 21h18M5 21V11l7-5 7 5v10"/>
+            <path d="M9 21v-6h6v6"/>
+          </svg>
+          <span>스테이트 할당</span>
+        </button>
+        <button id="tab-region" class="tab-btn" title="전략구역 할당 (4)">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="9"/>
+            <path d="M3 12h18M12 3c3 3 4 6 4 9s-1 6-4 9M12 3c-3 3-4 6-4 9s1 6 4 9"/>
+          </svg>
+          <span>전략구역 할당</span>
+        </button>
+      </span>
       <button id="tab-reference" class="tab-btn" title="참조 이미지 선택·이동·자유 변형">
         <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
           <rect x="5" y="5" width="14" height="14" rx="1"/>
@@ -135,11 +136,11 @@
 
     <!-- 공통: 보호 토글 -->
     <div class="tb-group">
-      <label class="toggle" title="호수 프로빈스 변경/편입 방지">
+      <label class="toggle" title="호수 프로빈스와 해당 높이맵 픽셀 변경 방지">
         <input type="checkbox" id="toggle-protect-lake" checked />
         <span>호수 보호</span>
       </label>
-      <label class="toggle" title="바다 프로빈스 변경/편입 방지">
+      <label class="toggle" title="바다 프로빈스와 해당 높이맵 픽셀 변경 방지">
         <input type="checkbox" id="toggle-protect-sea" checked />
         <span>바다 보호</span>
       </label>
@@ -156,15 +157,26 @@
       <span id="current-rgb" class="rgb-text">#FF0000</span>
     </div>
     <div class="tb-group info-group terrain-only" hidden>
-      <span class="label">지형 팔레트</span>
+      <span class="label">현재 지형</span>
       <span id="terrain-swatch" class="swatch"></span>
-      <select id="terrain-palette-select" title="terrain.bmp 팔레트 인덱스"></select>
       <span id="terrain-index-label" class="rgb-text">-</span>
     </div>
     <div class="tb-group info-group heightmap-only" hidden>
+      <button id="btn-height-coast-smooth" class="tool-btn height-coast-tool"
+              type="button" title="바다 프로빈스를 클릭해 인접 육지의 해안 고도를 자동으로 다듬기">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M3 15c3-4 5-4 8 0s5 4 10 0"/>
+          <path d="M3 19c3-4 5-4 8 0s5 4 10 0"/>
+          <path d="M4 10c3 0 4-5 8-5s5 4 8 4"/>
+        </svg>
+        <span>해안 다듬기</span>
+      </button>
+      <label class="label" for="height-coast-width">해안 폭</label>
+      <input id="height-coast-width" class="compact-number" type="number"
+             min="2" max="128" step="1" value="12" title="해안에서 육지 안쪽으로 만들 경사 폭 (맵 픽셀)" />
       <label class="label" for="height-brush-size">브러시 크기</label>
       <input id="height-brush-size" class="compact-number" type="number"
-             min="1" max="256" step="1" value="32" title="브러시 지름 (맵 픽셀)" />
+             min="1" max="256" step="1" value="32" title="브러시 지름 (맵 픽셀) · [ / ] 단축키" />
       <label class="label" for="height-brush-strength">강도</label>
       <input id="height-brush-strength" class="compact-number" type="number"
              min="1" max="100" step="1" value="25" title="목표 높이에 접근하는 강도 (%)" />
@@ -172,6 +184,10 @@
       <input id="height-brush-value" class="compact-number" type="number"
              min="0" max="255" step="1" value="110" title="0=최저, 95=기본 해수면, 255=최고" />
       <span id="height-brush-readout" class="rgb-text">11.0 / 육지</span>
+      <label class="toggle" title="높이값 0~255를 파랑→빨강 HSV 색상각으로 표시합니다. 실제 높이값과 스포이드는 바뀌지 않습니다.">
+        <input type="checkbox" id="toggle-heightmap-hue" />
+        <span>고도 색상각</span>
+      </label>
     </div>
     <div class="tb-group info-group rivers-only" hidden>
       <label class="label" for="river-palette-select">강 도구</label>
@@ -193,23 +209,6 @@
       <button id="btn-river-validate" type="button" title="발원지·연결·두께 규칙 검사">강 규칙 검사</button>
       <span id="river-edit-readout" class="rgb-text">상하좌우 1px 연결</span>
     </div>
-    <div class="tb-group info-group supply-only" hidden>
-      <label class="label" for="supply-tool-select">보급 도구</label>
-      <select id="supply-tool-select">
-        <option value="hub">보급 허브 추가·제거</option>
-        <option value="rail">철도 경로 그리기</option>
-      </select>
-      <label class="label" for="supply-rail-level">철도 레벨</label>
-      <select id="supply-rail-level">
-        <option value="1">1</option><option value="2">2</option>
-        <option value="3">3</option><option value="4">4</option>
-        <option value="5">5</option>
-      </select>
-      <button id="btn-supply-rail-finish" type="button">경로 완료</button>
-      <select id="supply-rail-list" title="기존 철도 선택"></select>
-      <button id="btn-supply-rail-delete" type="button">선택 철도 삭제</button>
-      <span id="supply-edit-readout" class="rgb-text">허브를 클릭해 추가·제거</span>
-    </div>
     <div class="tb-group info-group reference-only" hidden>
       <span class="label">드래그: 이동</span>
       <span class="label">조절점: 자유 크기</span>
@@ -220,6 +219,13 @@
       <span class="label">스테이트</span>
       <span id="selected-state-swatch" class="swatch"></span>
       <span id="selected-state-label" class="rgb-text">없음 (클릭으로 선택)</span>
+      <span class="label">Shift+좌클릭 할당 · 우클릭 해제</span>
+    </div>
+    <div class="tb-group info-group region-only" hidden>
+      <span class="label">전략구역</span>
+      <span id="selected-region-swatch" class="swatch"></span>
+      <span id="selected-region-label" class="rgb-text">없음 (클릭으로 선택)</span>
+      <span class="label">Shift+좌클릭 할당 · 우클릭 해제</span>
     </div>
     <div class="tb-group info-group split-only" hidden>
       <label class="label" for="split-avg-input">평균 px</label>
@@ -247,6 +253,18 @@
   <div id="support-editor-menu" class="support-editor-menu" hidden
        role="menu" aria-label="맵 지원 편집">
     <div class="support-editor-menu-title">맵 지원 편집</div>
+    <button id="tab-adjacency" class="support-editor-item" type="button"
+            role="menuitem" title="adjacencies.csv 편집">
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="5" cy="12" r="2.5"/>
+        <circle cx="19" cy="12" r="2.5"/>
+        <path d="M7.5 12 H 16.5" stroke-dasharray="2 2"/>
+      </svg>
+      <span class="support-editor-item-copy">
+        <strong>인접 연결</strong>
+        <small>adjacencies.csv 특수 연결 편집</small>
+      </span>
+    </button>
     <button id="tab-terrain" class="support-editor-item" type="button"
             role="menuitem" title="terrain.bmp 편집">
       <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
@@ -311,6 +329,7 @@
       <canvas id="heightmap-layer-canvas"></canvas>
       <canvas id="terrain-layer-canvas"></canvas>
       <canvas id="rivers-layer-canvas"></canvas>
+      <canvas id="supply-selection-canvas"></canvas>
       <svg id="supply-svg" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"></svg>
       <canvas id="protect-canvas"></canvas>
       <div id="reference-layer-host"></div>
@@ -448,13 +467,14 @@
       <h1>HOI4 Province Painter</h1>
       <p>왼쪽 위 <b>"맵 폴더 열기"</b> 버튼으로 <code>provinces.bmp</code>가 들어 있는 <code>map/</code> 폴더(또는 모드 루트)를 선택하세요.</p>
       <ul>
-        <li><b>탭 버튼</b>: 프로빈스 편집 / 스테이트 할당 / 자동 분할 모드 전환</li>
+        <li><b>탭 버튼</b>: 프로빈스 편집 / 스테이트 할당 / 자동 분할 / 전략구역 할당 모드 전환</li>
         <li><b>[자동 분할] 좌클릭</b>: 그 위치의 프로빈스를 선택 → '분할' 버튼으로 평균 px 기준 4가지 알고리즘 혼합 분할</li>
         <li><b>[프로빈스 편집] 좌클릭 드래그</b>: 1×1 픽셀 채색 (브러시)</li>
         <li><b>[프로빈스 편집] B / G</b>: 브러시 / 페인트통 도구 전환</li>
         <li><b>[스테이트 할당] 좌클릭</b>: 그 위치의 스테이트를 현재 선택으로 지정</li>
         <li><b>[스테이트 할당] Shift+좌클릭</b>: 클릭한 프로빈스를 현재 스테이트에 편입</li>
-        <li><b>우클릭 (짧게)</b>: 스포이드 (해당 픽셀 정보)</li>
+        <li><b>[스테이트/전략구역 할당] 우클릭</b>: 클릭한 프로빈스의 현재 할당 해제</li>
+        <li><b>그 외 모드 우클릭 (짧게)</b>: 스포이드 (해당 픽셀 정보)</li>
         <li><b>우클릭 드래그</b>: 화면 팬</li>
         <li><b>휠</b>: 줌 (커서 기준)</li>
         <li><b>Ctrl+Z / Ctrl+Y</b>: 실행취소 / 다시실행 (브러시 모드)</li>
@@ -462,6 +482,7 @@
         <li><b>Delete</b>: 커서 위치 프로빈스를 인접 프로빈스로 흡수(=삭제). 19000개 한도 관리용.</li>
         <li><b>[인접 연결] 좌클릭 × 2</b>: 두 프로빈스를 잇는 adjacency를 추가 (해협/운하/임패서블).</li>
         <li><b>[지형 편집]</b>: terrain.bmp 팔레트 인덱스를 선택해 브러시/페인트통으로 편집합니다.</li>
+        <li><b>[ / ]</b>: 높이맵 브러시 크기를 줄이거나 늘립니다.</li>
         <li><b>참조 이미지</b>: PNG/JPG/BMP를 화면에 드래그 드롭하면 입력을 가리지 않는 레이어로 표시됩니다.</li>
         <li><b>흰색 프로빈스 테두리</b>: 오른쪽 레이어 패널에서 실제 provinces.bmp 경계를 켜고 끕니다.</li>
       </ul>
@@ -533,6 +554,46 @@
         <button id="adj-clear-btn" class="adj-clear-btn" title="선택 초기화">↺</button>
       </div>
       <div id="adj-hint" class="adj-hint">캔버스에서 첫 프로빈스를 클릭하세요.</div>
+    </div>
+
+    <div id="terrain-palette-bar" class="support-bottom-panel hidden" aria-hidden="true">
+      <div class="support-panel-header">
+        <div>
+          <strong>terrain.bmp 팔레트</strong>
+          <span>색상과 지형 이름을 선택하세요 · 8칸 × 32줄</span>
+        </div>
+        <select id="terrain-palette-select" hidden aria-hidden="true"></select>
+      </div>
+      <div id="terrain-palette-grid" class="terrain-palette-grid"></div>
+    </div>
+
+    <div id="supply-editor-bar" class="support-bottom-panel supply-editor-panel hidden"
+         aria-hidden="true">
+      <div class="supply-tool-row">
+        <div class="supply-tool-switch" role="group" aria-label="보급망 도구">
+          <button id="btn-supply-tool-hub" class="active" type="button">보급 허브</button>
+          <button id="btn-supply-tool-rail" type="button">철도 그리기·편집</button>
+        </div>
+        <div id="supply-hub-controls" class="supply-mode-controls">
+          <strong>좌클릭</strong><span>허브 추가</span>
+          <strong>Shift+좌클릭</strong><span>허브 삭제</span>
+        </div>
+        <div id="supply-rail-controls" class="supply-mode-controls" hidden>
+          <label for="supply-rail-level">레벨</label>
+          <select id="supply-rail-level">
+            <option value="1">1</option><option value="2">2</option>
+            <option value="3">3</option><option value="4">4</option>
+            <option value="5">5</option>
+          </select>
+          <button id="btn-supply-rail-finish" class="primary" type="button">적용</button>
+          <button id="btn-supply-rail-cancel" type="button">취소</button>
+          <select id="supply-rail-list" title="기존 철도 선택"></select>
+          <button id="btn-supply-rail-delete" type="button">선택 철도 삭제</button>
+        </div>
+      </div>
+      <div id="supply-edit-readout" class="support-panel-hint">
+        좌클릭으로 허브 추가 · Shift+좌클릭으로 허브 삭제
+      </div>
     </div>
 
     <!-- 인접 목록 사이드 패널 -->
