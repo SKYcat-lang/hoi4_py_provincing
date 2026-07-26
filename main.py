@@ -28,11 +28,17 @@ from core.map_loader import (
     find_map_paths,
     load_continent_txt,
     load_definition_csv,
+    load_heightmap_bmp,
     load_provinces_bmp,
+    load_rivers_bmp,
+    load_rivers_palette,
+    load_supply_nodes,
+    load_railways,
     load_state_files,
     load_strategic_regions,
     load_terrain_bmp,
     load_terrain_categories,
+    load_terrain_palette,
 )
 from core.map_saver import (
     analyze_for_save,
@@ -41,8 +47,15 @@ from core.map_saver import (
     update_state_file,
     update_strategic_region_file,
     write_definition_csv,
+    write_heightmap_bmp,
+    write_world_normal_bmp,
     write_provinces_bmp,
+    write_rivers_bmp,
+    write_supply_nodes,
+    write_railways,
+    write_terrain_bmp,
 )
+from core.normal_map import generate_world_normal as build_world_normal
 from core.province_analyzer import find_adjacent_colors
 from core.xcrossing import find_all_xcrossings, find_xcrossings_near
 from core.validators import (
@@ -115,6 +128,17 @@ class Api:
         # 저장 시 (현재 vs 디스크) 비교로 부모 RGB를 정확히 재구성한다.
         self.disk_provinces_arr: Optional[np.ndarray] = None
         self.terrain_arr: Optional[np.ndarray] = None
+        self.terrain_palette: Optional[list[list[int]]] = None
+        self.terrain_dirty = False
+        self.heightmap_arr: Optional[np.ndarray] = None
+        self.heightmap_dirty = False
+        self.world_normal_stale = False
+        self.rivers_arr: Optional[np.ndarray] = None
+        self.rivers_palette: Optional[list[list[int]]] = None
+        self.rivers_dirty = False
+        self.supply_nodes: list[dict] = []
+        self.railways: list[dict] = []
+        self.supply_dirty = False
         self.provinces: list[Province] = []
         self.terrain_categories: list[TerrainCategory] = []
         self.continents: list[str] = []
@@ -161,6 +185,17 @@ class Api:
                 # 디스크 RGB → 최종 RGB 직결 매핑이 자연스럽게 만들어진다.
                 self.disk_provinces_arr = self.provinces_arr.copy()
                 self.terrain_arr = load_terrain_bmp(paths.terrain_bmp)
+                self.terrain_palette = load_terrain_palette(paths.terrain_bmp)
+                self.terrain_dirty = False
+                self.heightmap_arr = load_heightmap_bmp(paths.heightmap_bmp)
+                self.heightmap_dirty = False
+                self.world_normal_stale = not os.path.isfile(paths.world_normal_bmp)
+                self.rivers_arr = load_rivers_bmp(paths.rivers_bmp)
+                self.rivers_palette = load_rivers_palette(paths.rivers_bmp)
+                self.rivers_dirty = False
+                self.supply_nodes = load_supply_nodes(paths.supply_nodes_txt)
+                self.railways = load_railways(paths.railways_txt)
+                self.supply_dirty = False
                 self.provinces = load_definition_csv(paths.definition_csv)
                 self.continents = load_continent_txt(paths.continent_txt)
                 self.terrain_categories = load_terrain_categories(paths.common_terrain_dir)
@@ -187,6 +222,45 @@ class Api:
                 # terrain: 팔레트 적용 RGB 변환 → 회색조가 아닌 진짜 색상.
                 rivers_data_url = encode_rivers_layer_png_base64(paths.rivers_bmp)
                 terrain_data_url = encode_terrain_layer_png_base64(paths.terrain_bmp)
+                terrain_editable = (
+                    self.terrain_arr is not None
+                    and self.terrain_arr.ndim == 2
+                    and self.terrain_palette is not None
+                    and self.terrain_arr.shape[:2] == self.provinces_arr.shape[:2]
+                )
+                terrain_index_data_url = (
+                    encode_image_to_png_base64(self.terrain_arr)
+                    if terrain_editable else None
+                )
+                used_terrain_indices = (
+                    set(int(v) for v in np.unique(self.terrain_arr).tolist())
+                    if terrain_editable else set()
+                )
+                terrain_palette_entries = []
+                if terrain_editable and self.terrain_palette is not None:
+                    for index, color in enumerate(self.terrain_palette):
+                        category_name = (
+                            self.terrain_categories[index].name
+                            if index < len(self.terrain_categories)
+                            else None
+                        )
+                        terrain_palette_entries.append({
+                            "index": index,
+                            "rgb": color,
+                            "name": category_name,
+                            "used": index in used_terrain_indices,
+                        })
+                heightmap_editable = (
+                    self.heightmap_arr is not None
+                    and self.heightmap_arr.ndim == 2
+                    and self.heightmap_arr.shape[:2] == self.provinces_arr.shape[:2]
+                )
+                rivers_editable = (
+                    self.rivers_arr is not None
+                    and self.rivers_arr.ndim == 2
+                    and self.rivers_palette is not None
+                    and self.rivers_arr.shape[:2] == self.provinces_arr.shape[:2]
+                )
 
                 return {
                     "ok": True,
@@ -197,6 +271,27 @@ class Api:
                     "imageDataUrl": encode_image_to_png_base64(self.provinces_arr),
                     "riversImageDataUrl": rivers_data_url,
                     "terrainImageDataUrl": terrain_data_url,
+                    "terrainIndexDataUrl": terrain_index_data_url,
+                    "terrainEditable": terrain_editable,
+                    "terrainPalette": terrain_palette_entries,
+                    "heightmapEditable": heightmap_editable,
+                    "heightmapImageDataUrl": (
+                        encode_image_to_png_base64(self.heightmap_arr)
+                        if heightmap_editable else None
+                    ),
+                    "worldNormalAvailable": os.path.isfile(paths.world_normal_bmp),
+                    "worldNormalStale": self.world_normal_stale,
+                    "riversEditable": rivers_editable,
+                    "riversIndexDataUrl": (
+                        encode_image_to_png_base64(self.rivers_arr)
+                        if rivers_editable else None
+                    ),
+                    "supplyEditable": (
+                        os.path.isfile(paths.supply_nodes_txt)
+                        and os.path.isfile(paths.railways_txt)
+                    ),
+                    "supplyNodes": self.supply_nodes,
+                    "railways": self.railways,
                     "provinceCount": len(self.provinces),
                     "lakeRgbs": lake_rgbs,
                     "seaRgbs": sea_rgbs,
@@ -382,6 +477,382 @@ class Api:
             self.color_pool.add(new_rgb_t)
 
         return {"ok": True, "applied": applied, "skipped": skipped}
+
+    # -------- terrain.bmp 편집 ----------
+
+    def _terrain_edit_error(self) -> Optional[str]:
+        if self.terrain_arr is None:
+            return "terrain.bmp가 로드되지 않았습니다."
+        if self.terrain_arr.ndim != 2 or self.terrain_palette is None:
+            return "terrain.bmp가 8비트 인덱스 형식이 아니어서 안전하게 편집할 수 없습니다."
+        return None
+
+    def apply_terrain_stroke(
+        self, pixels: list[list[int]], terrain_index: int
+    ) -> dict:
+        """Apply a brush stroke to the indexed terrain buffer."""
+        error = self._terrain_edit_error()
+        if error:
+            return {"ok": False, "error": error}
+
+        index = int(terrain_index)
+        if not 0 <= index <= 255:
+            return {"ok": False, "error": "지형 팔레트 인덱스가 범위를 벗어났습니다."}
+
+        arr = self.terrain_arr
+        assert arr is not None
+        height, width = arr.shape
+        applied = 0
+        for pixel in pixels:
+            x, y = int(pixel[0]), int(pixel[1])
+            if not (0 <= x < width and 0 <= y < height):
+                continue
+            if int(arr[y, x]) == index:
+                continue
+            arr[y, x] = index
+            applied += 1
+        if applied:
+            self.terrain_dirty = True
+        return {"ok": True, "applied": applied}
+
+    def apply_terrain_changes(self, changes: list[list[int]]) -> dict:
+        """Apply exact ``[x, y, palette_index]`` values for undo/redo."""
+        error = self._terrain_edit_error()
+        if error:
+            return {"ok": False, "error": error}
+
+        arr = self.terrain_arr
+        assert arr is not None
+        height, width = arr.shape
+        applied = 0
+        for change in changes:
+            if len(change) < 3:
+                continue
+            x, y, index = int(change[0]), int(change[1]), int(change[2])
+            if not (0 <= x < width and 0 <= y < height and 0 <= index <= 255):
+                continue
+            if int(arr[y, x]) == index:
+                continue
+            arr[y, x] = index
+            applied += 1
+        if applied:
+            self.terrain_dirty = True
+        return {"ok": True, "applied": applied}
+
+    def flood_fill_terrain(self, x: int, y: int, terrain_index: int) -> dict:
+        """Fill one connected indexed-terrain region and return undo values."""
+        error = self._terrain_edit_error()
+        if error:
+            return {"ok": False, "error": error}
+
+        arr = self.terrain_arr
+        assert arr is not None
+        height, width = arr.shape
+        x, y, new_index = int(x), int(y), int(terrain_index)
+        if not (0 <= x < width and 0 <= y < height):
+            return {"ok": False, "error": "범위 밖 좌표입니다."}
+        if not 0 <= new_index <= 255:
+            return {"ok": False, "error": "지형 팔레트 인덱스가 범위를 벗어났습니다."}
+
+        target = int(arr[y, x])
+        if target == new_index:
+            return {"ok": True, "changedPixels": [], "applied": 0}
+
+        mask_eq = arr == target
+        visited = np.zeros_like(mask_eq, dtype=bool)
+        from collections import deque
+        queue: deque[tuple[int, int]] = deque([(x, y)])
+        visited[y, x] = True
+        changed_pixels: list[list[int]] = []
+
+        while queue:
+            cx, cy = queue.popleft()
+            arr[cy, cx] = new_index
+            changed_pixels.append([cx, cy, target])
+
+            if cx > 0 and mask_eq[cy, cx - 1] and not visited[cy, cx - 1]:
+                visited[cy, cx - 1] = True
+                queue.append((cx - 1, cy))
+            if cx + 1 < width and mask_eq[cy, cx + 1] and not visited[cy, cx + 1]:
+                visited[cy, cx + 1] = True
+                queue.append((cx + 1, cy))
+            if cy > 0 and mask_eq[cy - 1, cx] and not visited[cy - 1, cx]:
+                visited[cy - 1, cx] = True
+                queue.append((cx, cy - 1))
+            if cy + 1 < height and mask_eq[cy + 1, cx] and not visited[cy + 1, cx]:
+                visited[cy + 1, cx] = True
+                queue.append((cx, cy + 1))
+
+        self.terrain_dirty = bool(changed_pixels) or self.terrain_dirty
+        return {
+            "ok": True,
+            "changedPixels": changed_pixels,
+            "applied": len(changed_pixels),
+        }
+
+    # -------- heightmap.bmp 편집 ----------
+
+    def _heightmap_edit_error(self) -> Optional[str]:
+        if self.heightmap_arr is None:
+            return "heightmap.bmp가 없거나 8비트 그레이스케일 형식이 아닙니다."
+        if self.heightmap_arr.ndim != 2:
+            return "heightmap.bmp를 안전하게 편집할 수 없습니다."
+        return None
+
+    def apply_heightmap_changes(self, changes: list[list[int]]) -> dict:
+        """Apply exact ``[x, y, greyscale_value]`` height values."""
+        error = self._heightmap_edit_error()
+        if error:
+            return {"ok": False, "error": error}
+        arr = self.heightmap_arr
+        assert arr is not None
+        height, width = arr.shape
+        applied = 0
+        for change in changes:
+            if len(change) < 3:
+                continue
+            x, y, value = int(change[0]), int(change[1]), int(change[2])
+            if not (0 <= x < width and 0 <= y < height):
+                continue
+            value = max(0, min(255, value))
+            if int(arr[y, x]) == value:
+                continue
+            arr[y, x] = value
+            applied += 1
+        if applied:
+            self.heightmap_dirty = True
+            self.world_normal_stale = True
+        return {"ok": True, "applied": applied}
+
+    def generate_world_normal(self) -> dict:
+        """Generate and immediately write world_normal.bmp from live height data."""
+        error = self._heightmap_edit_error()
+        if error:
+            return {"ok": False, "error": error}
+        if self.paths is None or self.heightmap_arr is None:
+            return {"ok": False, "error": "맵 경로가 로드되지 않았습니다."}
+        try:
+            existed = os.path.isfile(self.paths.world_normal_bmp)
+            normal = build_world_normal(self.heightmap_arr)
+            write_world_normal_bmp(normal, self.paths.world_normal_bmp)
+            self.world_normal_stale = False
+            return {
+                "ok": True,
+                "path": self.paths.world_normal_bmp,
+                "width": int(normal.shape[1]),
+                "height": int(normal.shape[0]),
+                "overwritten": existed,
+                "heightmapDirty": self.heightmap_dirty,
+            }
+        except Exception as exc:
+            traceback.print_exc()
+            return {"ok": False, "error": str(exc), "trace": traceback.format_exc()}
+
+    # -------- rivers.bmp 편집 ----------
+
+    def _rivers_edit_error(self) -> Optional[str]:
+        if self.rivers_arr is None or self.rivers_palette is None:
+            return "rivers.bmp가 없거나 8비트 인덱스 형식이 아닙니다."
+        if self.rivers_arr.ndim != 2:
+            return "rivers.bmp를 안전하게 편집할 수 없습니다."
+        return None
+
+    def apply_rivers_changes(self, changes: list[list[int]]) -> dict:
+        """Apply exact ``[x, y, palette_index]`` river-map values."""
+        error = self._rivers_edit_error()
+        if error:
+            return {"ok": False, "error": error}
+        arr = self.rivers_arr
+        assert arr is not None
+        height, width = arr.shape
+        allowed = set(range(12)) | {254, 255}
+        applied = 0
+        for change in changes:
+            if len(change) < 3:
+                continue
+            x, y, index = int(change[0]), int(change[1]), int(change[2])
+            if not (0 <= x < width and 0 <= y < height and index in allowed):
+                continue
+            if int(arr[y, x]) == index:
+                continue
+            arr[y, x] = index
+            applied += 1
+        if applied:
+            self.rivers_dirty = True
+        return {"ok": True, "applied": applied}
+
+    def validate_river_topology(self, max_issues: int = 200) -> dict:
+        """Validate the structural rules used by HOI4's rivers.bmp."""
+        error = self._rivers_edit_error()
+        if error:
+            return {"ok": False, "error": error}
+        from collections import deque
+
+        arr = self.rivers_arr
+        assert arr is not None
+        height, width = arr.shape
+        # 0..11 are interpreted as rivers. 12..255 are deliberately legal:
+        # the game ignores them and map authors commonly use those indices as
+        # comments (for example, land/sea guides).
+        issues: list[dict] = []
+
+        river = arr <= 11
+        visited = np.zeros_like(river, dtype=bool)
+        component_count = 0
+        source_count = 0
+        for start_y, start_x in zip(*np.where(river & ~visited)):
+            if visited[start_y, start_x]:
+                continue
+            component_count += 1
+            queue = deque([(int(start_x), int(start_y))])
+            visited[start_y, start_x] = True
+            component: list[tuple[int, int]] = []
+            sources: list[tuple[int, int]] = []
+            edge_count = 0
+            while queue:
+                x, y = queue.popleft()
+                component.append((x, y))
+                if int(arr[y, x]) == 0:
+                    sources.append((x, y))
+                for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
+                    if 0 <= nx < width and 0 <= ny < height and river[ny, nx]:
+                        edge_count += 1
+                        if not visited[ny, nx]:
+                            visited[ny, nx] = True
+                            queue.append((nx, ny))
+            edge_count //= 2
+            source_count += len(sources)
+            if len(sources) != 1 and len(issues) < max_issues:
+                x, y = component[0]
+                issues.append({
+                    "kind": "source_count", "x": x, "y": y,
+                    "count": len(sources), "pixels": len(component),
+                })
+            if edge_count >= len(component) and len(issues) < max_issues:
+                x, y = component[0]
+                issues.append({"kind": "cycle", "x": x, "y": y})
+
+        if height > 1 and width > 1:
+            blocks = (
+                river[:-1, :-1] & river[:-1, 1:] &
+                river[1:, :-1] & river[1:, 1:]
+            )
+            thick_y, thick_x = np.where(blocks)
+            for x, y in zip(thick_x, thick_y):
+                if len(issues) >= max_issues:
+                    break
+                issues.append({"kind": "thick_2x2", "x": int(x), "y": int(y)})
+
+        return {
+            "ok": True,
+            "valid": not issues,
+            "issues": issues,
+            "truncated": len(issues) >= max_issues,
+            "componentCount": component_count,
+            "sourceCount": source_count,
+        }
+
+    # -------- supply_nodes.txt / railways.txt 편집 ----------
+
+    def validate_supply_network(
+        self, nodes: Optional[list[dict]] = None,
+        railways: Optional[list[dict]] = None,
+    ) -> dict:
+        """Validate supply records against live land provinces and adjacency."""
+        if self.provinces_arr is None:
+            return {"ok": False, "error": "맵이 로드되지 않았습니다."}
+        nodes = self.supply_nodes if nodes is None else nodes
+        railways = self.railways if railways is None else railways
+        by_id = {province.id: province for province in self.provinces}
+        live_colors = find_used_colors(self.provinces_arr)
+        issues: list[dict] = []
+
+        seen_nodes: set[int] = set()
+        for index, node in enumerate(nodes):
+            try:
+                level = int(node["level"])
+                province_id = int(node["province"])
+            except (KeyError, TypeError, ValueError):
+                issues.append({"kind": "invalid_node", "index": index})
+                continue
+            province = by_id.get(province_id)
+            if level != 1:
+                issues.append({"kind": "node_level", "index": index, "level": level})
+            if province is None or province.type != "land" or province.rgb not in live_colors:
+                issues.append({"kind": "invalid_node_province", "index": index,
+                               "province": province_id})
+            elif province_id not in self.assignments:
+                issues.append({"kind": "stateless_node", "index": index,
+                               "province": province_id})
+            if province_id in seen_nodes:
+                issues.append({"kind": "duplicate_node", "index": index,
+                               "province": province_id})
+            seen_nodes.add(province_id)
+
+        rail_ids = {
+            int(province_id)
+            for railway in railways
+            for province_id in railway.get("provinces", [])
+            if str(province_id).lstrip("-").isdigit()
+        }
+        target_rgbs = {by_id[pid].rgb for pid in rail_ids if pid in by_id}
+        color_adjacency = find_adjacent_colors(self.provinces_arr, target_rgbs)
+        id_by_rgb = {province.rgb: province.id for province in self.provinces}
+        id_adjacency = {
+            id_by_rgb[rgb]: {id_by_rgb[n] for n in neighbours if n in id_by_rgb}
+            for rgb, neighbours in color_adjacency.items() if rgb in id_by_rgb
+        }
+
+        for index, railway in enumerate(railways):
+            try:
+                level = int(railway["level"])
+                province_ids = [int(value) for value in railway["provinces"]]
+            except (KeyError, TypeError, ValueError):
+                issues.append({"kind": "invalid_railway", "index": index})
+                continue
+            if not 1 <= level <= 5:
+                issues.append({"kind": "railway_level", "index": index,
+                               "level": level})
+            if len(province_ids) < 2:
+                issues.append({"kind": "railway_too_short", "index": index})
+            for province_id in province_ids:
+                province = by_id.get(province_id)
+                if province is None or province.type != "land" or province.rgb not in live_colors:
+                    issues.append({"kind": "invalid_railway_province", "index": index,
+                                   "province": province_id})
+                elif province_id not in self.assignments:
+                    issues.append({"kind": "stateless_railway", "index": index,
+                                   "province": province_id})
+            for start, end in zip(province_ids, province_ids[1:]):
+                if end not in id_adjacency.get(start, set()):
+                    issues.append({"kind": "disjointed_railway", "index": index,
+                                   "from": start, "to": end})
+
+        return {"ok": True, "valid": not issues, "issues": issues}
+
+    def update_supply_network(self, nodes: list[dict], railways: list[dict]) -> dict:
+        """Replace the in-memory supply network after full validation."""
+        try:
+            normalized_nodes = [
+                {"level": int(node["level"]), "province": int(node["province"])}
+                for node in nodes
+            ]
+            normalized_railways = [
+                {"level": int(railway["level"]),
+                 "provinces": [int(value) for value in railway["provinces"]]}
+                for railway in railways
+            ]
+        except (KeyError, TypeError, ValueError) as exc:
+            return {"ok": False, "valid": False, "error": f"보급망 입력 형식 오류: {exc}"}
+        validation = self.validate_supply_network(normalized_nodes, normalized_railways)
+        if not validation.get("valid", False):
+            return validation
+        self.supply_nodes = normalized_nodes
+        self.railways = normalized_railways
+        self.supply_dirty = True
+        return {"ok": True, "valid": True,
+                "nodeCount": len(normalized_nodes),
+                "railwayCount": len(normalized_railways)}
 
     # -------- 외부 BMP 덮어쓰기 ----------
 
@@ -1012,6 +1483,10 @@ class Api:
         )
         return {
             "ok": True,
+            "terrainDirty": self.terrain_dirty,
+            "heightmapDirty": self.heightmap_dirty,
+            "riversDirty": self.rivers_dirty,
+            "supplyDirty": self.supply_dirty,
             "newProvinces": [
                 {
                     "id": p.id,
@@ -1078,8 +1553,55 @@ class Api:
 
             removed_ids = {p.id for p in removed}
 
-            # 1) provinces.bmp 저장
+            # Validate every edited river before touching any on-disk map file.
+            # This avoids a partial save where provinces.bmp was already written
+            # before a malformed rivers.bmp was rejected.
+            if self.rivers_dirty:
+                topology = self.validate_river_topology()
+                if not topology.get("valid", False):
+                    raise ValueError(
+                        f"rivers.bmp 규칙 위반 {len(topology.get('issues', []))}건을 먼저 수정하세요."
+                    )
+            if self.supply_dirty:
+                supply_validation = self.validate_supply_network()
+                if not supply_validation.get("valid", False):
+                    raise ValueError(
+                        f"보급망 규칙 위반 {len(supply_validation.get('issues', []))}건을 먼저 수정하세요."
+                    )
+
+            # 1) provinces.bmp / terrain.bmp 저장
             write_provinces_bmp(self.provinces_arr, self.paths.provinces_bmp)
+            terrain_saved = False
+            if self.terrain_dirty:
+                if self.terrain_arr is None or self.terrain_palette is None:
+                    raise ValueError("편집한 terrain.bmp의 인덱스 팔레트 정보가 없습니다.")
+                write_terrain_bmp(
+                    self.terrain_arr,
+                    self.paths.terrain_bmp,
+                    self.terrain_palette,
+                )
+                terrain_saved = True
+            heightmap_saved = False
+            if self.heightmap_dirty:
+                if self.heightmap_arr is None:
+                    raise ValueError("편집한 heightmap.bmp 데이터가 없습니다.")
+                write_heightmap_bmp(self.heightmap_arr, self.paths.heightmap_bmp)
+                heightmap_saved = True
+            rivers_saved = False
+            if self.rivers_dirty:
+                if self.rivers_arr is None or self.rivers_palette is None:
+                    raise ValueError("편집한 rivers.bmp의 인덱스 팔레트 정보가 없습니다.")
+                write_rivers_bmp(
+                    self.rivers_arr,
+                    self.paths.rivers_bmp,
+                    self.rivers_palette,
+                )
+                rivers_saved = True
+            supply_saved = False
+            if self.supply_dirty:
+                write_supply_nodes(self.paths.supply_nodes_txt, self.supply_nodes)
+                write_railways(self.paths.railways_txt, self.railways)
+                supply_saved = True
 
             # 2) definition.csv: 새 항목 + 삭제 반영
             all_provs = [p for p in self.provinces if p.id not in removed_ids] + new_provs
@@ -1238,10 +1760,27 @@ class Api:
             live_used = find_used_colors(self.provinces_arr)
             live_used.discard((0, 0, 0))
             live_count = len(live_used)
+            if terrain_saved:
+                self.terrain_dirty = False
+            if heightmap_saved:
+                self.heightmap_dirty = False
+            if rivers_saved:
+                self.rivers_dirty = False
+            if supply_saved:
+                self.supply_dirty = False
 
             return {
                 "ok": True,
                 "provincesBmp": self.paths.provinces_bmp,
+                "terrainBmp": self.paths.terrain_bmp if terrain_saved else None,
+                "terrainSaved": terrain_saved,
+                "heightmapBmp": self.paths.heightmap_bmp if heightmap_saved else None,
+                "heightmapSaved": heightmap_saved,
+                "riversBmp": self.paths.rivers_bmp if rivers_saved else None,
+                "riversSaved": rivers_saved,
+                "supplyNodesTxt": self.paths.supply_nodes_txt if supply_saved else None,
+                "railwaysTxt": self.paths.railways_txt if supply_saved else None,
+                "supplySaved": supply_saved,
                 "definitionCsv": self.paths.definition_csv,
                 "newProvinceCount": len(new_provs),
                 "removedProvinceCount": len(removed_ids),

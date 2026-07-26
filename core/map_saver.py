@@ -83,7 +83,89 @@ def build_new_provinces(provinces_arr, terrain_arr, new_rgbs, existing_provinces
 
 
 def write_provinces_bmp(arr, path):
-    Image.fromarray(arr, mode="RGB").save(path, format="BMP")
+    image = Image.fromarray(arr, mode="RGB")
+    try:
+        image.save(path, format="BMP")
+    finally:
+        image.close()
+
+
+def write_terrain_bmp(arr, path, palette):
+    """Save an indexed terrain.bmp without changing its palette indices."""
+    if arr is None or getattr(arr, "ndim", 0) != 2:
+        raise ValueError("terrain.bmp must be an 8-bit indexed image")
+    if not palette or len(palette) != 256:
+        raise ValueError("terrain.bmp palette must contain 256 RGB entries")
+
+    flat_palette: list[int] = []
+    for color in palette:
+        if len(color) != 3:
+            raise ValueError("invalid terrain palette entry")
+        flat_palette.extend(max(0, min(255, int(channel))) for channel in color)
+
+    image = Image.fromarray(arr.astype("uint8", copy=False), mode="P")
+    try:
+        image.putpalette(flat_palette)
+        image.save(path, format="BMP")
+    finally:
+        image.close()
+
+
+def write_heightmap_bmp(arr, path):
+    """Save an uncompressed 8-bit greyscale HOI4 heightmap."""
+    if arr is None or getattr(arr, "ndim", 0) != 2:
+        raise ValueError("heightmap.bmp must be an 8-bit greyscale image")
+    image = Image.fromarray(arr.astype("uint8", copy=False), mode="L")
+    try:
+        image.save(path, format="BMP", compression="raw")
+    finally:
+        image.close()
+
+
+def write_world_normal_bmp(arr, path):
+    """Save an uncompressed 24-bit RGB HOI4 world normal map."""
+    if arr is None or getattr(arr, "ndim", 0) != 3 or arr.shape[2] != 3:
+        raise ValueError("world_normal.bmp must be a 24-bit RGB image")
+    image = Image.fromarray(arr.astype("uint8", copy=False), mode="RGB")
+    try:
+        image.save(path, format="BMP", compression="raw")
+    finally:
+        image.close()
+
+
+def write_rivers_bmp(arr, path, palette):
+    """Save rivers.bmp while preserving raw indices and its 256-entry palette."""
+    write_terrain_bmp(arr, path, palette)
+    # Pillow writes biClrUsed/biClrImportant as 256. HOI4's stock rivers.bmp
+    # leaves both fields at zero; matching that header avoids the harmless but
+    # noisy "Palette in rivers.bmp is probably not correct" map error.
+    with open(path, "r+b") as bitmap:
+        bitmap.seek(46)
+        bitmap.write(b"\x00\x00\x00\x00")
+        bitmap.seek(50)
+        bitmap.write(b"\x00\x00\x00\x00")
+
+
+def write_supply_nodes(path, nodes):
+    """Write canonical ``level province`` supply node records."""
+    lines = [f"{int(node['level'])} {int(node['province'])}" for node in nodes]
+    with open(path, "w", encoding="utf-8", newline="") as output:
+        output.write("\r\n".join(lines))
+        if lines:
+            output.write("\r\n")
+
+
+def write_railways(path, railways):
+    """Write canonical ``level count province...`` railway records."""
+    lines = []
+    for railway in railways:
+        provinces = [int(value) for value in railway["provinces"]]
+        values = " ".join(str(value) for value in provinces)
+        lines.append(f"{int(railway['level'])} {len(provinces)} {values}")
+    with open(path, "w", encoding="utf-8", newline="") as output:
+        output.write("\r\n".join(lines))
+        if lines:
+            output.write("\r\n")
 
 
 def write_definition_csv(path, provinces, removed_ids):

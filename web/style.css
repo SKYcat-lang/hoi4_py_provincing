@@ -142,10 +142,80 @@ button.tool-btn.active {
   color: #fff;
 }
 
-button.tab-btn.active {
+button.tab-btn.active,
+button.support-menu-trigger.active {
   background: #2c5a9e;
   border-color: #2c5a9e;
   color: #fff;
+}
+
+.support-menu-chevron {
+  color: var(--muted);
+  font-size: 11px;
+  transition: transform 120ms ease;
+}
+.support-menu-trigger[aria-expanded="true"] .support-menu-chevron {
+  transform: rotate(180deg);
+}
+.support-editor-menu {
+  position: fixed;
+  z-index: 200;
+  width: 292px;
+  padding: 6px;
+  background: rgba(35, 35, 42, 0.98);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.48);
+}
+.support-editor-menu-title {
+  padding: 7px 9px 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+button.support-editor-item {
+  width: 100%;
+  height: auto;
+  min-height: 52px;
+  padding: 7px 9px;
+  border-color: transparent;
+  background: transparent;
+  justify-content: flex-start;
+  text-align: left;
+}
+button.support-editor-item:hover:not(:disabled) {
+  background: #404049;
+}
+button.support-editor-item.active {
+  color: #fff;
+  background: #2c5a9e;
+  border-color: #2c5a9e;
+}
+button.support-editor-item:disabled {
+  opacity: 0.46;
+}
+.support-editor-item .icon {
+  width: 22px;
+  height: 22px;
+}
+.support-editor-item-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+}
+.support-editor-item-copy strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+.support-editor-item-copy small {
+  color: var(--muted);
+  font-size: 11px;
+}
+button.support-editor-item.active small {
+  color: rgba(255, 255, 255, 0.72);
 }
 
 [hidden] { display: none !important; }
@@ -247,7 +317,7 @@ input[type="range"] {
   height: 100%;
 }
 
-#map-canvas, #overlay-canvas, #protect-canvas,
+#map-canvas, #overlay-canvas, #protect-canvas, #heightmap-layer-canvas,
 #terrain-layer-canvas, #rivers-layer-canvas {
   display: block;
   image-rendering: pixelated;
@@ -258,17 +328,202 @@ input[type="range"] {
   left: 0;
   transform-origin: 0 0;
 }
+#heightmap-layer-canvas,
 #terrain-layer-canvas, #rivers-layer-canvas {
   pointer-events: none;
   /* 기본 숨김. JS가 토글 시 visibility/opacity 갱신 */
   opacity: 0;
 }
+#supply-svg {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: none;
+  overflow: visible;
+  pointer-events: none;
+  transform-origin: 0 0;
+  z-index: 12;
+}
+#supply-svg .supply-rail {
+  fill: none;
+  stroke: #ffb52e;
+  stroke-width: 3;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+  paint-order: stroke;
+}
+#supply-svg .supply-rail-draft {
+  stroke: #ffffff;
+  stroke-dasharray: 6 4;
+}
+#supply-svg .supply-hub {
+  fill: #68e488;
+  stroke: #102a18;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+.compact-number {
+  width: 58px !important;
+  height: 30px !important;
+  padding: 4px 5px !important;
+}
 #protect-canvas {
   pointer-events: none;
+}
+#province-border-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: none;
+  pointer-events: none;
+  z-index: 25;
+}
+#support-brush-preview {
+  position: absolute;
+  display: none;
+  box-sizing: border-box;
+  border: 1px solid rgba(255, 255, 255, 0.95);
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.75);
+  pointer-events: none;
+  z-index: 28;
 }
 #overlay-canvas {
   pointer-events: none;
   image-rendering: auto;
+}
+#reference-layer-host {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  transform-origin: 0 0;
+}
+.reference-layer-object {
+  position: absolute;
+  box-sizing: border-box;
+  transform-origin: 50% 50%;
+  pointer-events: none;
+  user-select: none;
+}
+.reference-layer-object > img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-drag: none;
+  object-fit: fill;
+}
+#canvas-area.reference-transform-mode .reference-layer-object {
+  pointer-events: auto;
+  cursor: move;
+}
+.reference-selection-frame {
+  display: none;
+  position: absolute;
+  inset: 0;
+  border: var(--reference-border-width, 1px) dashed #111;
+  box-shadow: 0 0 0 var(--reference-border-width, 1px) rgba(255, 255, 255, 0.85);
+  pointer-events: none;
+}
+#canvas-area.reference-transform-mode .reference-layer-object.selected .reference-selection-frame {
+  display: block;
+}
+.reference-transform-handle {
+  display: none;
+  position: absolute;
+  width: var(--reference-handle-size, 10px);
+  height: var(--reference-handle-size, 10px);
+  padding: 0;
+  border: var(--reference-border-width, 1px) solid #111;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 0 0 var(--reference-border-width, 1px) rgba(255, 255, 255, 0.8);
+  pointer-events: auto;
+  z-index: 3;
+}
+#canvas-area.reference-transform-mode .reference-layer-object.selected .reference-transform-handle {
+  display: block;
+}
+.reference-transform-handle[data-handle="nw"] { left: 0; top: 0; transform: translate(-50%, -50%); cursor: nwse-resize; }
+.reference-transform-handle[data-handle="n"]  { left: 50%; top: 0; transform: translate(-50%, -50%); cursor: ns-resize; }
+.reference-transform-handle[data-handle="ne"] { right: 0; top: 0; transform: translate(50%, -50%); cursor: nesw-resize; }
+.reference-transform-handle[data-handle="e"]  { right: 0; top: 50%; transform: translate(50%, -50%); cursor: ew-resize; }
+.reference-transform-handle[data-handle="se"] { right: 0; bottom: 0; transform: translate(50%, 50%); cursor: nwse-resize; }
+.reference-transform-handle[data-handle="s"]  { left: 50%; bottom: 0; transform: translate(-50%, 50%); cursor: ns-resize; }
+.reference-transform-handle[data-handle="sw"] { left: 0; bottom: 0; transform: translate(-50%, 50%); cursor: nesw-resize; }
+.reference-transform-handle[data-handle="w"]  { left: 0; top: 50%; transform: translate(-50%, -50%); cursor: ew-resize; }
+.reference-transform-handle[data-handle="rotate"] {
+  left: 50%;
+  top: calc(-1 * var(--reference-rotate-offset, 28px));
+  transform: translate(-50%, -50%);
+  cursor: grab;
+  background: #f8f8f8;
+}
+.reference-transform-handle[data-handle="rotate"]::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 100%;
+  width: var(--reference-border-width, 1px);
+  height: var(--reference-rotate-offset, 28px);
+  background: #222;
+  transform: translateX(-50%);
+}
+.reference-transform-handle[data-handle="rotate"]:active { cursor: grabbing; }
+.reference-transform-pivot {
+  display: none;
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: var(--reference-pivot-size, 12px);
+  height: var(--reference-pivot-size, 12px);
+  transform: translate(-50%, -50%);
+  border: var(--reference-border-width, 1px) solid #111;
+  border-radius: 50%;
+  pointer-events: none;
+  z-index: 2;
+}
+.reference-transform-pivot::before,
+.reference-transform-pivot::after {
+  content: "";
+  position: absolute;
+  background: #111;
+}
+.reference-transform-pivot::before {
+  left: 50%;
+  top: -25%;
+  width: var(--reference-border-width, 1px);
+  height: 150%;
+  transform: translateX(-50%);
+}
+.reference-transform-pivot::after {
+  left: -25%;
+  top: 50%;
+  width: 150%;
+  height: var(--reference-border-width, 1px);
+  transform: translateY(-50%);
+}
+#canvas-area.reference-transform-mode .reference-layer-object.selected .reference-transform-pivot {
+  display: block;
+}
+.reference-layer-object.selected {
+  z-index: 20 !important;
+}
+.reference-layer-object.hidden {
+  display: none;
+}
+.reference-layer-object,
+.reference-layer-object > img {
+  pointer-events: none;
+  image-rendering: auto;
+}
+#canvas-area.reference-drag-active {
+  outline: 3px solid var(--accent);
+  outline-offset: -3px;
 }
 
 /* SVG 마커 레이어 — 캔버스 transform과 무관, 화면 좌표 기준 */
@@ -359,10 +614,93 @@ input[type="range"] {
 .layer-row .toggle { flex-shrink: 0; min-width: 110px; }
 .layer-row input[type="range"] { flex: 1; min-width: 60px; width: auto; }
 .layer-row .rgb-text { min-width: 36px; text-align: right; }
+.reference-layer-section {
+  border-top: 1px solid var(--border);
+  margin-top: 3px;
+  padding-top: 8px;
+}
+.reference-layer-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+  font-weight: 600;
+}
+.reference-drop-hint,
+.reference-layer-empty {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: normal;
+}
+#reference-layer-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+.reference-layer-empty {
+  padding: 6px 0;
+}
+.reference-layer-item {
+  display: grid;
+  grid-template-columns: 20px minmax(80px, 1fr) 52px 28px;
+  grid-template-areas:
+    "visible name scale remove"
+    "opacity opacity opacity opacity";
+  align-items: center;
+  gap: 4px 6px;
+  padding: 5px;
+  background: var(--bg-3);
+  border-radius: 4px;
+}
+.reference-layer-item.selected {
+  outline: 1px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, var(--bg-3));
+}
+.reference-layer-visible { grid-area: visible; }
+.reference-layer-name {
+  grid-area: name;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.reference-layer-scale {
+  grid-area: scale;
+  width: 52px !important;
+  height: 26px;
+  padding: 2px 3px;
+}
+.reference-layer-remove {
+  grid-area: remove;
+  min-width: 28px;
+  width: 28px;
+  height: 26px;
+  padding: 0;
+  color: var(--danger);
+}
+.reference-layer-opacity {
+  grid-area: opacity;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.reference-layer-opacity input {
+  flex: 1;
+  width: auto;
+  height: 22px;
+}
+.reference-layer-opacity span {
+  min-width: 32px;
+  text-align: right;
+  color: var(--muted);
+  font-size: 11px;
+}
 
 /* 검증 패널 (레이어 패널 아래) */
 .check-panel {
-  top: 200px;  /* 레이어 패널 높이만큼 아래 */
+  top: 380px;
 }
 .check-row {
   display: flex;
@@ -395,7 +733,7 @@ input[type="range"] {
 
 /* 기능 패널 (검증 패널 아래) */
 .tool-panel {
-  top: 440px;  /* 검증 패널 5행 + 헤더 + 마진 확보 */
+  top: 620px;
 }
 
 /* 감독자 다이얼로그: 큰 폭 + 좌우 반반 구조 */

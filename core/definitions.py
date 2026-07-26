@@ -81,7 +81,11 @@ class MapPaths:
     provinces_bmp: str
     definition_csv: str
     terrain_bmp: str
+    heightmap_bmp: str
+    world_normal_bmp: str
     rivers_bmp: str   # map/rivers.bmp (오버레이 레이어용)
+    supply_nodes_txt: str
+    railways_txt: str
     continent_txt: str
     default_map: str
     strategicregions_dir: str

@@ -46,7 +46,11 @@ def find_map_paths(map_dir: str) -> MapPaths:
         provinces_bmp=os.path.join(map_dir, "provinces.bmp"),
         definition_csv=os.path.join(map_dir, "definition.csv"),
         terrain_bmp=os.path.join(map_dir, "terrain.bmp"),
+        heightmap_bmp=os.path.join(map_dir, "heightmap.bmp"),
+        world_normal_bmp=os.path.join(map_dir, "world_normal.bmp"),
         rivers_bmp=os.path.join(map_dir, "rivers.bmp"),
+        supply_nodes_txt=os.path.join(map_dir, "supply_nodes.txt"),
+        railways_txt=os.path.join(map_dir, "railways.txt"),
         continent_txt=os.path.join(map_dir, "continent.txt"),
         default_map=os.path.join(map_dir, "default.map"),
         strategicregions_dir=os.path.join(map_dir, "strategicregions"),
@@ -62,10 +66,9 @@ def load_provinces_bmp(path: str) -> np.ndarray:
 
     HOI4 BMP는 BGR 24bit이지만 Pillow가 RGB로 변환해주므로 그대로 사용.
     """
-    img = Image.open(path)
-    if img.mode != "RGB":
-        img = img.convert("RGB")
-    arr = np.array(img, dtype=np.uint8)
+    with Image.open(path) as source:
+        img = source if source.mode == "RGB" else source.convert("RGB")
+        arr = np.array(img, dtype=np.uint8)
     return arr  # shape (H, W, 3)
 
 
@@ -76,14 +79,100 @@ def load_terrain_bmp(path: str) -> Optional[np.ndarray]:
     """
     if not os.path.isfile(path):
         return None
-    img = Image.open(path)
-    # 8bit palette 그대로 두고 인덱스 배열만 읽는다
-    if img.mode == "P":
-        arr = np.array(img, dtype=np.uint8)  # (H, W)
-        return arr
-    # fallback: RGB로 변환
-    arr = np.array(img.convert("RGB"), dtype=np.uint8)
-    return arr
+    with Image.open(path) as img:
+        # 8bit palette 그대로 두고 인덱스 배열만 읽는다
+        if img.mode == "P":
+            return np.array(img, dtype=np.uint8)  # (H, W)
+        # fallback: RGB로 변환
+        return np.array(img.convert("RGB"), dtype=np.uint8)
+
+
+def load_terrain_palette(path: str) -> Optional[list[list[int]]]:
+    """Return the exact 256-entry RGB palette used by an indexed terrain.bmp.
+
+    ``terrain.bmp`` is game data, not a regular illustration.  Keeping its
+    palette indices intact is important because the index identifies the
+    terrain category.  RGB terrain files are still supported for read-only
+    display, but cannot be safely edited as indexed terrain.
+    """
+    if not os.path.isfile(path):
+        return None
+    with Image.open(path) as img:
+        if img.mode != "P":
+            return None
+        raw = list(img.getpalette() or [])
+    raw.extend([0] * (768 - len(raw)))
+    return [
+        [int(raw[i]), int(raw[i + 1]), int(raw[i + 2])]
+        for i in range(0, 768, 3)
+    ]
+
+
+def load_heightmap_bmp(path: str) -> Optional[np.ndarray]:
+    """Load HOI4's 8-bit greyscale heightmap without palette conversion."""
+    if not os.path.isfile(path):
+        return None
+    with Image.open(path) as image:
+        if image.mode != "L":
+            return None
+        return np.array(image, dtype=np.uint8)
+
+
+def load_rivers_bmp(path: str) -> Optional[np.ndarray]:
+    """Load rivers.bmp as raw 8-bit palette indices."""
+    if not os.path.isfile(path):
+        return None
+    with Image.open(path) as image:
+        if image.mode != "P":
+            return None
+        return np.array(image, dtype=np.uint8)
+
+
+def load_rivers_palette(path: str) -> Optional[list[list[int]]]:
+    """Return the exact 256-entry rivers.bmp palette."""
+    return load_terrain_palette(path)
+
+
+def load_supply_nodes(path: str) -> list[dict]:
+    """Load ``level province`` records from map/supply_nodes.txt."""
+    if not os.path.isfile(path):
+        return []
+    records: list[dict] = []
+    for line_number, raw_line in enumerate(_read_text(path).splitlines(), 1):
+        clean = raw_line.split("#", 1)[0].strip()
+        if not clean:
+            continue
+        parts = clean.split()
+        if len(parts) != 2:
+            raise ValueError(f"supply_nodes.txt {line_number}행 형식 오류")
+        records.append({
+            "level": int(parts[0]),
+            "province": int(parts[1]),
+        })
+    return records
+
+
+def load_railways(path: str) -> list[dict]:
+    """Load ``level count province...`` records from map/railways.txt."""
+    if not os.path.isfile(path):
+        return []
+    records: list[dict] = []
+    for line_number, raw_line in enumerate(_read_text(path).splitlines(), 1):
+        clean = raw_line.split("#", 1)[0].strip()
+        if not clean:
+            continue
+        parts = clean.split()
+        if len(parts) < 3:
+            raise ValueError(f"railways.txt {line_number}행 형식 오류")
+        level = int(parts[0])
+        count = int(parts[1])
+        provinces = [int(value) for value in parts[2:]]
+        if count != len(provinces):
+            raise ValueError(
+                f"railways.txt {line_number}행의 프로빈스 수({count})가 실제 목록과 다릅니다."
+            )
+        records.append({"level": level, "provinces": provinces})
+    return records
 
 
 def encode_image_to_png_base64(arr: np.ndarray) -> str:
@@ -112,11 +201,10 @@ def encode_terrain_layer_png_base64(path: str) -> str | None:
     if not os.path.isfile(path):
         return None
     try:
-        img = Image.open(path)
-        if img.mode != "RGB":
-            img = img.convert("RGB")
-        buf = io.BytesIO()
-        img.save(buf, format="PNG", compress_level=1)
+        with Image.open(path) as source:
+            img = source if source.mode == "RGB" else source.convert("RGB")
+            buf = io.BytesIO()
+            img.save(buf, format="PNG", compress_level=1)
         return f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode('ascii')}"
     except Exception:
         return None
@@ -135,8 +223,8 @@ def encode_rivers_layer_png_base64(path: str) -> str | None:
     if not os.path.isfile(path):
         return None
     try:
-        img = Image.open(path).convert("RGB")
-        rgb = np.array(img, dtype=np.uint8)
+        with Image.open(path) as source:
+            rgb = np.array(source.convert("RGB"), dtype=np.uint8)
         h, w = rgb.shape[:2]
 
         # 알파 채널: 흰색/회색은 0(투명), 나머지는 255(불투명)

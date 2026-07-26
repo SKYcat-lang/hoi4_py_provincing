@@ -23,7 +23,7 @@ const state = {
   pixelBuf: null,          // imageData.data (Uint8ClampedArray)
   stateImageData: null,    // 스테이트 맵용 ImageData (캐시, 매핑 변경 시 갱신)
   stateImageDirty: true,   // 다음 탭 진입 시 재구성해야 하는가
-  mode: 'province',        // 'province' | 'state' | 'split' (탭)
+  mode: 'province',        // 'province' | 'state' | 'split' | 'adjacency' | 'terrain'
   splitClickedXY: null,    // 분할 모드에서 마지막으로 클릭한 픽셀
   zoom: 1,
   panX: 0,
@@ -37,6 +37,7 @@ const state = {
   lastPaintY: -1,
   strokeChanges: [],
   strokePixels: [],
+  strokeLockTerrainIndex: null,
   // 한 번의 브러시 스트로크 동안 "잠긴 원본 색".
   // mouseDown 시점의 픽셀 색으로 설정되며, 드래그 중에는 이 색을 가진 픽셀만 칠함.
   // mouseUp에서 null로 리셋.
@@ -55,6 +56,36 @@ const state = {
   regions: [],
   continents: [],
   newProvincesPreview: [],
+  terrainEditable: false,
+  terrainPalette: [],
+  terrainImageData: null,
+  terrainPixelBuf: null,
+  terrainIndexBuf: null,
+  currentTerrainIndex: 0,
+  heightmapEditable: false,
+  heightmapImageData: null,
+  heightmapPixelBuf: null,
+  heightmapValueBuf: null,
+  heightmapStrokeOriginals: new Map(),
+  worldNormalAvailable: false,
+  worldNormalStale: false,
+  riversEditable: false,
+  riversImageData: null,
+  riversPixelBuf: null,
+  riversIndexBuf: null,
+  currentRiverIndex: 3,
+  supplyEditable: false,
+  supplyNodes: [],
+  railways: [],
+  supplyCentroids: null,
+  supplyRailDraft: [],
+  activeStrokeKind: null,
+  provinceBordersDirty: true,
+  provinceBorderDirtyBounds: null,
+  referenceLayers: [],
+  nextReferenceLayerId: 1,
+  selectedReferenceLayerId: null,
+  referenceTransform: null,
 };
 
 const canvas = $('#map-canvas');
@@ -74,8 +105,19 @@ const riversLayerCtx = riversLayerCanvas.getContext('2d');
 riversLayerCtx.imageSmoothingEnabled = false;
 
 const terrainLayerCanvas = $('#terrain-layer-canvas');
-const terrainLayerCtx = terrainLayerCanvas.getContext('2d');
+const terrainLayerCtx = terrainLayerCanvas.getContext('2d', { willReadFrequently: true });
 terrainLayerCtx.imageSmoothingEnabled = false;
+
+const heightmapLayerCanvas = $('#heightmap-layer-canvas');
+const heightmapLayerCtx = heightmapLayerCanvas.getContext('2d', { willReadFrequently: true });
+heightmapLayerCtx.imageSmoothingEnabled = false;
+const supplySvg = $('#supply-svg');
+
+const provinceBorderCanvas = $('#province-border-canvas');
+let provinceBorderRenderer = null;
+let provinceBorderFrame = 0;
+
+const referenceLayerHost = $('#reference-layer-host');
 
 // X-crossing 좌표 [(x,y), ...]
 state.xcrossings = [];
@@ -98,6 +140,52 @@ function updateCurrentColorLabel() {
   $('#current-swatch').style.background = rgbToHex(state.currentRgb);
   $('#current-rgb').textContent = rgbToHex(state.currentRgb).toUpperCase();
 }
+function terrainPaletteEntry(index = state.currentTerrainIndex) {
+  return state.terrainPalette.find(entry => entry.index === index) || null;
+}
+function updateTerrainPaletteLabel() {
+  const entry = terrainPaletteEntry();
+  const swatch = $('#terrain-swatch');
+  const label = $('#terrain-index-label');
+  if (!entry) {
+    if (swatch) swatch.style.background = 'transparent';
+    if (label) label.textContent = '-';
+    return;
+  }
+  if (swatch) swatch.style.background = rgbToHex(entry.rgb);
+  if (label) label.textContent = `#${entry.index} ${rgbToHex(entry.rgb).toUpperCase()}`;
+}
+
+function updateHeightmapBrushReadout() {
+  const valueInput = $('#height-brush-value');
+  const readout = $('#height-brush-readout');
+  if (!valueInput || !readout) return;
+  const value = Math.max(0, Math.min(255, Number(valueInput.value) || 0));
+  valueInput.value = String(Math.round(value));
+  readout.textContent = `${(value / 10).toFixed(1)} / ${value <= 95 ? '수면 이하' : '육지'}`;
+}
+
+function refreshWorldNormalAction() {
+  const button = $('#action-world-normal');
+  if (!button) return;
+  button.disabled = !state.heightmapEditable;
+  const hint = button.querySelector('small');
+  if (!hint) return;
+  if (!state.heightmapEditable) {
+    hint.textContent = 'heightmap.bmp를 사용할 수 없음';
+  } else if (state.worldNormalStale) {
+    hint.textContent = '높이맵 변경됨 · 재생성 필요';
+  } else if (state.worldNormalAvailable) {
+    hint.textContent = 'world_normal.bmp · 즉시 재생성';
+  } else {
+    hint.textContent = 'world_normal.bmp 없음 · 생성 가능';
+  }
+}
+
+function markWorldNormalStale() {
+  state.worldNormalStale = true;
+  refreshWorldNormalAction();
+}
 
 // ---------- 변환 ----------
 // ---------- 레이어 (rivers / terrain) ----------
@@ -119,11 +207,362 @@ function loadOverlayLayer(layerCanvas, layerCtx, dataUrl) {
   img.src = dataUrl;
 }
 
+async function loadImageElement(dataUrl) {
+  if (!dataUrl) return null;
+  const image = new Image();
+  image.decoding = 'sync';
+  await new Promise((resolve, reject) => {
+    image.onload = resolve;
+    image.onerror = reject;
+    image.src = dataUrl;
+  });
+  return image;
+}
+
+async function loadTerrainEditorData(colorDataUrl, indexDataUrl) {
+  state.terrainImageData = null;
+  state.terrainPixelBuf = null;
+  state.terrainIndexBuf = null;
+
+  const colorImage = await loadImageElement(colorDataUrl);
+  if (colorImage) {
+    terrainLayerCtx.clearRect(0, 0, terrainLayerCanvas.width, terrainLayerCanvas.height);
+    terrainLayerCtx.drawImage(colorImage, 0, 0);
+    state.terrainImageData = terrainLayerCtx.getImageData(
+      0, 0, state.width, state.height,
+    );
+    state.terrainPixelBuf = state.terrainImageData.data;
+  }
+
+  const indexImage = await loadImageElement(indexDataUrl);
+  if (indexImage) {
+    const indexCanvas = document.createElement('canvas');
+    indexCanvas.width = state.width;
+    indexCanvas.height = state.height;
+    const indexCtx = indexCanvas.getContext('2d', { willReadFrequently: true });
+    indexCtx.drawImage(indexImage, 0, 0);
+    const rgba = indexCtx.getImageData(0, 0, state.width, state.height).data;
+    const indices = new Uint8Array(state.width * state.height);
+    for (let source = 0, target = 0; source < rgba.length; source += 4, target++) {
+      indices[target] = rgba[source];
+    }
+    state.terrainIndexBuf = indices;
+  }
+}
+
+async function loadHeightmapEditorData(dataUrl) {
+  state.heightmapImageData = null;
+  state.heightmapPixelBuf = null;
+  state.heightmapValueBuf = null;
+  const image = await loadImageElement(dataUrl);
+  if (!image) return;
+  heightmapLayerCtx.clearRect(0, 0, state.width, state.height);
+  heightmapLayerCtx.drawImage(image, 0, 0);
+  const imageData = heightmapLayerCtx.getImageData(0, 0, state.width, state.height);
+  const values = new Uint8Array(state.width * state.height);
+  for (let source = 0, target = 0; source < imageData.data.length; source += 4, target++) {
+    const value = imageData.data[source];
+    values[target] = value;
+    imageData.data[source] = value;
+    imageData.data[source + 1] = value;
+    imageData.data[source + 2] = value;
+    imageData.data[source + 3] = 255;
+  }
+  state.heightmapImageData = imageData;
+  state.heightmapPixelBuf = imageData.data;
+  state.heightmapValueBuf = values;
+  heightmapLayerCtx.putImageData(imageData, 0, 0);
+}
+
+const RIVER_COLORS = new Map([
+  [0, [0, 255, 0]], [1, [255, 0, 0]], [2, [255, 252, 0]],
+  [3, [0, 225, 255]], [4, [0, 200, 255]], [5, [0, 150, 255]],
+  [6, [0, 100, 255]], [7, [0, 0, 255]], [8, [0, 0, 225]],
+  [9, [0, 0, 200]], [10, [0, 0, 150]], [11, [0, 0, 100]],
+]);
+
+function setRiverDisplayPixel(offset, index) {
+  const color = RIVER_COLORS.get(index);
+  if (color) {
+    state.riversPixelBuf[offset] = color[0];
+    state.riversPixelBuf[offset + 1] = color[1];
+    state.riversPixelBuf[offset + 2] = color[2];
+    state.riversPixelBuf[offset + 3] = 255;
+  } else {
+    // 12..255 are non-river comment/background indices and are ignored by HOI4.
+    state.riversPixelBuf[offset + 3] = 0;
+  }
+}
+
+async function loadRiversEditorData(indexDataUrl) {
+  state.riversImageData = null;
+  state.riversPixelBuf = null;
+  state.riversIndexBuf = null;
+  const image = await loadImageElement(indexDataUrl);
+  if (!image) return;
+  const indexCanvas = document.createElement('canvas');
+  indexCanvas.width = state.width;
+  indexCanvas.height = state.height;
+  const indexCtx = indexCanvas.getContext('2d', { willReadFrequently: true });
+  indexCtx.drawImage(image, 0, 0);
+  const source = indexCtx.getImageData(0, 0, state.width, state.height).data;
+  const indices = new Uint8Array(state.width * state.height);
+  const imageData = riversLayerCtx.createImageData(state.width, state.height);
+  state.riversImageData = imageData;
+  state.riversPixelBuf = imageData.data;
+  for (let rgbaOffset = 0, indexOffset = 0;
+       rgbaOffset < source.length;
+       rgbaOffset += 4, indexOffset++) {
+    const index = source[rgbaOffset];
+    indices[indexOffset] = index;
+    setRiverDisplayPixel(rgbaOffset, index);
+  }
+  state.riversIndexBuf = indices;
+  riversLayerCtx.putImageData(imageData, 0, 0);
+}
+
 function applyLayerVisibility(layerCanvas, enabled, opacityPercent) {
   // CSS opacity로 투명도 적용. enabled=false면 0
   const op = enabled ? Math.max(0, Math.min(1, opacityPercent / 100)) : 0;
   layerCanvas.style.opacity = String(op);
   // pointer-events는 항상 none이라 클릭 통과는 보장
+}
+
+function refreshTerrainLayerVisibility() {
+  const toggle = $('#layer-terrain-toggle');
+  const opacity = $('#layer-terrain-opacity');
+  const readout = $('#layer-terrain-opacity-readout');
+  if (!toggle || !opacity) return;
+  if (state.mode === 'terrain' && state.terrainEditable) {
+    applyLayerVisibility(terrainLayerCanvas, true, 100);
+  } else {
+    applyLayerVisibility(
+      terrainLayerCanvas,
+      toggle.checked,
+      parseInt(opacity.value, 10),
+    );
+  }
+  if (readout) readout.textContent = `${opacity.value}%`;
+}
+
+function refreshSupportEditorLayers() {
+  heightmapLayerCanvas.style.opacity = (
+    state.mode === 'heightmap' && state.heightmapEditable ? '1' : '0'
+  );
+  if (state.mode === 'rivers' && state.riversEditable) {
+    applyLayerVisibility(riversLayerCanvas, true, 100);
+  } else {
+    const toggle = $('#layer-rivers-toggle');
+    const opacity = $('#layer-rivers-opacity');
+    if (toggle && opacity) {
+      applyLayerVisibility(
+        riversLayerCanvas,
+        toggle.checked,
+        parseInt(opacity.value, 10),
+      );
+    }
+  }
+  if (supplySvg) {
+    supplySvg.style.display = (
+      state.mode === 'supply' && state.supplyEditable ? 'block' : 'none'
+    );
+  }
+}
+
+function updateSupportBrushPreview(clientX, clientY) {
+  const preview = $('#support-brush-preview');
+  const area = $('#canvas-area');
+  if (!preview || !area || state.mode !== 'heightmap' || !state.heightmapEditable) {
+    if (preview) preview.style.display = 'none';
+    return;
+  }
+  const [x, y] = screenToPixel(clientX, clientY);
+  if (x < 0 || y < 0 || x >= state.width || y >= state.height) {
+    preview.style.display = 'none';
+    return;
+  }
+  const rect = area.getBoundingClientRect();
+  const diameter = Math.max(2, heightmapBrushSettings().radius * 2 * state.zoom);
+  preview.style.display = 'block';
+  preview.style.width = `${diameter}px`;
+  preview.style.height = `${diameter}px`;
+  preview.style.left = `${clientX - rect.left - diameter / 2}px`;
+  preview.style.top = `${clientY - rect.top - diameter / 2}px`;
+}
+
+function cloneSupplyNetwork() {
+  return {
+    nodes: state.supplyNodes.map(node => ({ ...node })),
+    railways: state.railways.map(railway => ({
+      level: railway.level,
+      provinces: [...railway.provinces],
+    })),
+  };
+}
+
+function provinceIdAtPixel(x, y) {
+  if (x < 0 || y < 0 || x >= state.width || y >= state.height) return null;
+  const [r, g, b] = getPixel(x, y);
+  return state.rgbToProvinceId.get(`${r},${g},${b}`) ?? null;
+}
+
+async function ensureSupplyCentroids() {
+  if (state.supplyCentroids) return state.supplyCentroids;
+  try {
+    const result = await window.pywebview.api.get_province_centroids();
+    state.supplyCentroids = result && result.ok ? (result.centroids || {}) : {};
+  } catch (error) {
+    console.error('supply centroid load failed', error);
+    state.supplyCentroids = {};
+  }
+  renderSupplyOverlay();
+  return state.supplyCentroids;
+}
+
+function refreshSupplyRailList() {
+  const select = $('#supply-rail-list');
+  if (!select) return;
+  const previous = select.value;
+  select.innerHTML = state.railways.map((railway, index) =>
+    `<option value="${index}">철도 ${index + 1} · Lv.${railway.level} · ${railway.provinces.length}개</option>`
+  ).join('');
+  if (state.railways.length === 0) {
+    select.innerHTML = '<option value="">철도 없음</option>';
+    select.disabled = true;
+    $('#btn-supply-rail-delete').disabled = true;
+  } else {
+    select.disabled = false;
+    $('#btn-supply-rail-delete').disabled = false;
+    select.value = state.railways[Number(previous)] ? previous : '0';
+  }
+}
+
+function renderSupplyOverlay() {
+  if (!supplySvg) return;
+  supplySvg.setAttribute('width', String(state.width));
+  supplySvg.setAttribute('height', String(state.height));
+  supplySvg.setAttribute('viewBox', `0 0 ${state.width} ${state.height}`);
+  supplySvg.replaceChildren();
+  if (!state.supplyCentroids) {
+    refreshSupplyRailList();
+    return;
+  }
+  const ns = 'http://www.w3.org/2000/svg';
+  refreshSupplyRailList();
+  const selectedIndex = Number($('#supply-rail-list')?.value);
+  state.railways.forEach((railway, index) => {
+    const points = railway.provinces
+      .map(provinceId => state.supplyCentroids[provinceId])
+      .filter(Boolean);
+    if (points.length < 2) return;
+    const polyline = document.createElementNS(ns, 'polyline');
+    polyline.setAttribute('points', points.map(point => point.join(',')).join(' '));
+    polyline.setAttribute('class', 'supply-rail');
+    polyline.style.stroke = index === selectedIndex ? '#ffffff' : '#ffb52e';
+    polyline.setAttribute('stroke-width', String(1.5 + Number(railway.level) * 0.6));
+    supplySvg.appendChild(polyline);
+  });
+  if (state.supplyRailDraft.length > 0) {
+    const points = state.supplyRailDraft
+      .map(provinceId => state.supplyCentroids[provinceId])
+      .filter(Boolean);
+    if (points.length > 0) {
+      const draft = document.createElementNS(ns, 'polyline');
+      draft.setAttribute('points', points.map(point => point.join(',')).join(' '));
+      draft.setAttribute('class', 'supply-rail supply-rail-draft');
+      supplySvg.appendChild(draft);
+    }
+  }
+  for (const node of state.supplyNodes) {
+    const point = state.supplyCentroids[node.province];
+    if (!point) continue;
+    const circle = document.createElementNS(ns, 'circle');
+    circle.setAttribute('class', 'supply-hub');
+    circle.setAttribute('cx', String(point[0]));
+    circle.setAttribute('cy', String(point[1]));
+    circle.setAttribute('r', String(6 / Math.max(state.zoom, 0.05)));
+    supplySvg.appendChild(circle);
+  }
+}
+
+function supplyIssueLabel(issue) {
+  const labels = {
+    invalid_node_province: '허브가 유효한 육지 프로빈스에 있지 않습니다',
+    stateless_node: '허브가 스테이트 없는 프로빈스에 있습니다',
+    duplicate_node: '같은 프로빈스에 허브가 중복됩니다',
+    invalid_railway_province: '철도가 유효한 육지 프로빈스를 벗어났습니다',
+    stateless_railway: '철도가 스테이트 없는 프로빈스를 지납니다',
+    disjointed_railway: '서로 인접하지 않은 철도 구간입니다',
+    railway_too_short: '철도는 프로빈스 2개 이상이어야 합니다',
+  };
+  return labels[issue?.kind] || issue?.kind || '알 수 없는 보급망 오류';
+}
+
+async function syncSupplyNetwork(previous) {
+  let result;
+  try {
+    result = await window.pywebview.api.update_supply_network(
+      state.supplyNodes,
+      state.railways,
+    );
+  } catch (error) {
+    result = { ok: false, error: String(error) };
+  }
+  if (!result || !result.ok || !result.valid) {
+    state.supplyNodes = previous.nodes;
+    state.railways = previous.railways;
+    const firstIssue = result?.issues?.[0];
+    setStatus(`보급망 변경 거부: ${result?.error || supplyIssueLabel(firstIssue)}`);
+    renderSupplyOverlay();
+    return false;
+  }
+  renderSupplyOverlay();
+  setStatus(`보급망 변경: 허브 ${state.supplyNodes.length}개 · 철도 ${state.railways.length}개`);
+  return true;
+}
+
+async function handleSupplyClick(x, y) {
+  const provinceId = provinceIdAtPixel(x, y);
+  if (provinceId === null) return;
+  const tool = $('#supply-tool-select').value;
+  if (tool === 'hub') {
+    const previous = cloneSupplyNetwork();
+    const index = state.supplyNodes.findIndex(node => node.province === provinceId);
+    if (index >= 0) state.supplyNodes.splice(index, 1);
+    else state.supplyNodes.push({ level: 1, province: provinceId });
+    await syncSupplyNetwork(previous);
+    return;
+  }
+  if (state.supplyRailDraft.at(-1) !== provinceId) {
+    state.supplyRailDraft.push(provinceId);
+  }
+  $('#supply-edit-readout').textContent =
+    `철도 초안: ${state.supplyRailDraft.length}개 프로빈스`;
+  renderSupplyOverlay();
+}
+
+async function finishSupplyRailway() {
+  if (state.supplyRailDraft.length < 2) {
+    setStatus('철도 경로는 인접한 프로빈스 2개 이상을 차례로 클릭해야 합니다.');
+    return;
+  }
+  const previous = cloneSupplyNetwork();
+  state.railways.push({
+    level: parseInt($('#supply-rail-level').value, 10) || 1,
+    provinces: [...state.supplyRailDraft],
+  });
+  state.supplyRailDraft = [];
+  const accepted = await syncSupplyNetwork(previous);
+  if (!accepted) state.supplyRailDraft = [];
+  $('#supply-edit-readout').textContent = '철도 경로를 새로 그릴 수 있습니다.';
+}
+
+async function deleteSelectedSupplyRailway() {
+  const index = parseInt($('#supply-rail-list').value, 10);
+  if (!Number.isInteger(index) || !state.railways[index]) return;
+  const previous = cloneSupplyNetwork();
+  state.railways.splice(index, 1);
+  await syncSupplyNetwork(previous);
 }
 
 function applyTransform() {
@@ -136,9 +575,24 @@ function applyTransform() {
   protectCanvas.style.transform = t;
   riversLayerCanvas.style.transformOrigin = '0 0';
   riversLayerCanvas.style.transform = t;
+  heightmapLayerCanvas.style.transformOrigin = '0 0';
+  heightmapLayerCanvas.style.transform = t;
+  supplySvg.style.transformOrigin = '0 0';
+  supplySvg.style.transform = t;
+  supplySvg.querySelectorAll('.supply-hub').forEach(circle => {
+    circle.setAttribute('r', String(6 / state.zoom));
+  });
   terrainLayerCanvas.style.transformOrigin = '0 0';
   terrainLayerCanvas.style.transform = t;
+  referenceLayerHost.style.width = `${state.width}px`;
+  referenceLayerHost.style.height = `${state.height}px`;
+  referenceLayerHost.style.transform = t;
+  referenceLayerHost.style.setProperty('--reference-handle-size', `${10 / state.zoom}px`);
+  referenceLayerHost.style.setProperty('--reference-pivot-size', `${12 / state.zoom}px`);
+  referenceLayerHost.style.setProperty('--reference-rotate-offset', `${28 / state.zoom}px`);
+  referenceLayerHost.style.setProperty('--reference-border-width', `${1 / state.zoom}px`);
   updateZoomLabel();
+  scheduleProvinceBorderRender();
   // SVG 마커는 transform과 별개로 화면 좌표로 다시 계산
   renderMarkers();
 }
@@ -148,6 +602,14 @@ function screenToPixel(clientX, clientY) {
   const x = (clientX - rect.left) / state.zoom;
   const y = (clientY - rect.top) / state.zoom;
   return [Math.floor(x), Math.floor(y)];
+}
+
+function screenToMapPoint(clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  return [
+    (clientX - rect.left) / state.zoom,
+    (clientY - rect.top) / state.zoom,
+  ];
 }
 
 // ---------- 픽셀 조작 ----------
@@ -164,6 +626,53 @@ function setPixelRaw(x, y, r, g, b) {
   buf[i + 1] = g;
   buf[i + 2] = b;
   buf[i + 3] = 255;
+}
+
+function getTerrainIndex(x, y) {
+  return state.terrainIndexBuf[y * state.width + x];
+}
+
+function setTerrainPixelRaw(x, y, terrainIndex) {
+  const entry = state.terrainPalette[terrainIndex] || terrainPaletteEntry(terrainIndex);
+  if (!entry || !state.terrainPixelBuf || !state.terrainIndexBuf) return;
+  const offset = (y * state.width + x) * 4;
+  state.terrainPixelBuf[offset] = entry.rgb[0];
+  state.terrainPixelBuf[offset + 1] = entry.rgb[1];
+  state.terrainPixelBuf[offset + 2] = entry.rgb[2];
+  state.terrainPixelBuf[offset + 3] = 255;
+  state.terrainIndexBuf[y * state.width + x] = terrainIndex;
+}
+
+function getHeightmapValue(x, y) {
+  return state.heightmapValueBuf[y * state.width + x];
+}
+
+function setHeightmapPixelRaw(x, y, value) {
+  value = Math.max(0, Math.min(255, Math.round(value)));
+  const index = y * state.width + x;
+  const offset = index * 4;
+  state.heightmapValueBuf[index] = value;
+  state.heightmapPixelBuf[offset] = value;
+  state.heightmapPixelBuf[offset + 1] = value;
+  state.heightmapPixelBuf[offset + 2] = value;
+  state.heightmapPixelBuf[offset + 3] = 255;
+}
+
+function getRiverIndex(x, y) {
+  return state.riversIndexBuf[y * state.width + x];
+}
+
+function riverBackgroundIndex(x, y) {
+  const [r, g, b] = getPixel(x, y);
+  const key = rgbKey(r, g, b);
+  return state.seaRgbSet.has(key) || state.lakeRgbSet.has(key) ? 254 : 255;
+}
+
+function setRiverPixelRaw(x, y, index) {
+  const bufferIndex = y * state.width + x;
+  const offset = bufferIndex * 4;
+  state.riversIndexBuf[bufferIndex] = index;
+  setRiverDisplayPixel(offset, index);
 }
 
 function paintPixel(x, y) {
@@ -193,6 +702,19 @@ function paintPixel(x, y) {
   state.stateImageDirty = true;  // 스테이트 맵 캐시 무효화
 }
 
+function paintTerrainPixel(x, y) {
+  if (!state.terrainEditable ||
+      x < 0 || y < 0 || x >= state.width || y >= state.height) return;
+  const currentIndex = getTerrainIndex(x, y);
+  if (state.strokeLockTerrainIndex !== null &&
+      currentIndex !== state.strokeLockTerrainIndex) return;
+  if (currentIndex === state.currentTerrainIndex) return;
+
+  state.strokeChanges.push([x, y, currentIndex]);
+  state.strokePixels.push([x, y]);
+  setTerrainPixelRaw(x, y, state.currentTerrainIndex);
+}
+
 function paintLine(x0, y0, x1, y1) {
   // Bresenham
   let dx = Math.abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
@@ -210,10 +732,827 @@ function paintLine(x0, y0, x1, y1) {
   }
 }
 
+function paintTerrainLine(x0, y0, x1, y1) {
+  let dx = Math.abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
+  let dy = -Math.abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+  let err = dx + dy;
+  let x = x0, y = y0;
+  let safety = (Math.abs(x1 - x0) + Math.abs(y1 - y0)) * 4 + 8;
+  while (safety-- > 0) {
+    paintTerrainPixel(x, y);
+    if (x === x1 && y === y1) break;
+    const e2 = 2 * err;
+    if (e2 >= dy) { err += dy; x += sx; }
+    if (e2 <= dx) { err += dx; y += sy; }
+  }
+}
+
+function heightmapBrushSettings() {
+  return {
+    radius: Math.max(0.5, (Number($('#height-brush-size')?.value) || 32) / 2),
+    strength: Math.max(0.01, Math.min(1, (Number($('#height-brush-strength')?.value) || 25) / 100)),
+    target: Math.max(0, Math.min(255, Number($('#height-brush-value')?.value) || 0)),
+  };
+}
+
+function paintHeightmapBrush(centerX, centerY) {
+  if (!state.heightmapEditable || !state.heightmapValueBuf) return;
+  const { radius, strength, target } = heightmapBrushSettings();
+  const minX = Math.max(0, Math.floor(centerX - radius));
+  const maxX = Math.min(state.width - 1, Math.ceil(centerX + radius));
+  const minY = Math.max(0, Math.floor(centerY - radius));
+  const maxY = Math.min(state.height - 1, Math.ceil(centerY + radius));
+  for (let y = minY; y <= maxY; y++) {
+    for (let x = minX; x <= maxX; x++) {
+      const dx = x + 0.5 - centerX;
+      const dy = y + 0.5 - centerY;
+      const distance = Math.hypot(dx, dy);
+      if (distance > radius) continue;
+      const falloff = Math.max(0, 1 - distance / Math.max(radius, 0.5));
+      const current = getHeightmapValue(x, y);
+      let next = Math.round(current + (target - current) * strength * falloff);
+      if (next === current && current !== target && falloff > 0.35) {
+        next = current + Math.sign(target - current);
+      }
+      next = Math.max(0, Math.min(255, next));
+      if (next === current) continue;
+      const key = y * state.width + x;
+      if (!state.heightmapStrokeOriginals.has(key)) {
+        state.heightmapStrokeOriginals.set(key, current);
+      }
+      setHeightmapPixelRaw(x, y, next);
+    }
+  }
+}
+
+function paintHeightmapLine(x0, y0, x1, y1) {
+  const radius = heightmapBrushSettings().radius;
+  const distance = Math.hypot(x1 - x0, y1 - y0);
+  const steps = Math.max(1, Math.ceil(distance / Math.max(1, radius * 0.3)));
+  for (let step = 1; step <= steps; step++) {
+    const t = step / steps;
+    paintHeightmapBrush(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t);
+  }
+}
+
+function paintRiverPixel(x, y, requestedIndex = state.currentRiverIndex) {
+  if (!state.riversEditable || !state.riversIndexBuf ||
+      x < 0 || y < 0 || x >= state.width || y >= state.height) return;
+  const next = requestedIndex === 'erase'
+    ? riverBackgroundIndex(x, y)
+    : Number(requestedIndex);
+  if (!(Number.isInteger(next) && ((next >= 0 && next <= 11) || next === 254 || next === 255))) return;
+  const current = getRiverIndex(x, y);
+  if (current === next) return;
+  const key = y * state.width + x;
+  if (!state.heightmapStrokeOriginals.has(key)) {
+    state.heightmapStrokeOriginals.set(key, current);
+  }
+  setRiverPixelRaw(x, y, next);
+}
+
+function paintRiverOrthogonalLine(x0, y0, x1, y1) {
+  let x = x0;
+  let y = y0;
+  const dx = Math.abs(x1 - x0);
+  const dy = Math.abs(y1 - y0);
+  const sx = x0 < x1 ? 1 : -1;
+  const sy = y0 < y1 ? 1 : -1;
+  let error = dx - dy;
+  let safety = (dx + dy) * 3 + 8;
+  while (safety-- > 0) {
+    paintRiverPixel(x, y);
+    if (x === x1 && y === y1) break;
+    const twice = error * 2;
+    if (twice > -dy && x !== x1) {
+      error -= dy;
+      x += sx;
+      paintRiverPixel(x, y);
+    }
+    if (twice < dx && y !== y1) {
+      error += dx;
+      y += sy;
+    }
+  }
+}
+
 function flushCanvas() {
   // 변경된 영역만 다시 그릴 수도 있지만, 5632×2048은 transform과 함께 전체
   // putImageData도 빠른 편이라(약 30ms) 일단 단순화한다.
   ctx.putImageData(state.imageData, 0, 0);
+}
+
+function flushTerrainCanvas() {
+  if (state.terrainImageData) {
+    terrainLayerCtx.putImageData(state.terrainImageData, 0, 0);
+  }
+}
+
+function flushHeightmapCanvas() {
+  if (state.heightmapImageData) {
+    heightmapLayerCtx.putImageData(state.heightmapImageData, 0, 0);
+  }
+}
+
+function flushRiversCanvas() {
+  if (state.riversImageData) {
+    riversLayerCtx.putImageData(state.riversImageData, 0, 0);
+  }
+}
+
+function compileBorderShader(gl, type, source) {
+  const shader = gl.createShader(type);
+  gl.shaderSource(shader, source);
+  gl.compileShader(shader);
+  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+    const message = gl.getShaderInfoLog(shader) || 'unknown shader error';
+    gl.deleteShader(shader);
+    throw new Error(message);
+  }
+  return shader;
+}
+
+function createBorderProgram(gl, vertexSource, fragmentSource) {
+  const vertex = compileBorderShader(gl, gl.VERTEX_SHADER, vertexSource);
+  const fragment = compileBorderShader(gl, gl.FRAGMENT_SHADER, fragmentSource);
+  const program = gl.createProgram();
+  gl.attachShader(program, vertex);
+  gl.attachShader(program, fragment);
+  gl.linkProgram(program);
+  gl.deleteShader(vertex);
+  gl.deleteShader(fragment);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    const message = gl.getProgramInfoLog(program) || 'unknown link error';
+    gl.deleteProgram(program);
+    throw new Error(message);
+  }
+  return program;
+}
+
+function initProvinceBorderRenderer() {
+  if (provinceBorderRenderer) return provinceBorderRenderer;
+  const gl = provinceBorderCanvas.getContext('webgl2', {
+    alpha: true,
+    antialias: false,
+    depth: false,
+    stencil: false,
+    premultipliedAlpha: true,
+    preserveDrawingBuffer: false,
+    powerPreference: 'high-performance',
+  });
+  if (!gl) {
+    provinceBorderRenderer = {
+      available: false,
+      error: 'WebGL2를 사용할 수 없습니다.',
+    };
+    return provinceBorderRenderer;
+  }
+
+  const fullscreenVertex = `#version 300 es
+    precision highp float;
+    void main() {
+      vec2 position;
+      if (gl_VertexID == 0) position = vec2(-1.0, -1.0);
+      else if (gl_VertexID == 1) position = vec2(3.0, -1.0);
+      else position = vec2(-1.0, 3.0);
+      gl_Position = vec4(position, 0.0, 1.0);
+    }
+  `;
+  const maskFragment = `#version 300 es
+    precision highp float;
+    precision highp int;
+    uniform sampler2D u_provinces;
+    uniform ivec2 u_map_size;
+    out vec4 out_color;
+
+    bool differs(ivec2 a, ivec2 b) {
+      return any(notEqual(
+        texelFetch(u_provinces, a, 0).rgb,
+        texelFetch(u_provinces, b, 0).rgb
+      ));
+    }
+
+    void main() {
+      ivec2 cell = ivec2(gl_FragCoord.xy);
+      bool edge = false;
+      if (cell.x + 1 < u_map_size.x) {
+        edge = edge || differs(cell, cell + ivec2(1, 0));
+      }
+      if (cell.y + 1 < u_map_size.y) {
+        edge = edge || differs(cell, cell + ivec2(0, 1));
+      }
+      out_color = vec4(edge ? 1.0 : 0.0, 0.0, 0.0, 1.0);
+    }
+  `;
+  const screenFragment = `#version 300 es
+    precision highp float;
+    precision highp int;
+    uniform sampler2D u_provinces;
+    uniform sampler2D u_border_mask;
+    uniform ivec2 u_map_size;
+    uniform vec2 u_pan;
+    uniform float u_zoom;
+    uniform float u_device_scale;
+    uniform float u_framebuffer_height;
+    uniform float u_line_width;
+    out vec4 out_color;
+
+    bool differs(ivec2 a, ivec2 b) {
+      return any(notEqual(
+        texelFetch(u_provinces, a, 0).rgb,
+        texelFetch(u_provinces, b, 0).rgb
+      ));
+    }
+
+    void main() {
+      vec2 screen = vec2(
+        gl_FragCoord.x,
+        u_framebuffer_height - gl_FragCoord.y
+      ) / u_device_scale;
+      vec2 map_point = (screen - u_pan) / u_zoom;
+      vec2 map_size = vec2(u_map_size);
+      if (map_point.x < 0.0 || map_point.y < 0.0 ||
+          map_point.x >= map_size.x || map_point.y >= map_size.y) {
+        discard;
+      }
+
+      vec2 uv = (map_point + vec2(0.5)) / map_size;
+      float physical_zoom = u_zoom * u_device_scale;
+      float lod = max(0.0, log2(1.0 / max(physical_zoom, 0.0001)));
+      float mask_coverage = textureLod(u_border_mask, uv, lod).r;
+      float mip_alpha = clamp(
+        mask_coverage * u_line_width / max(u_zoom, 0.02),
+        0.0,
+        1.0
+      );
+      float alpha = mip_alpha;
+      if (physical_zoom > 0.75) {
+        ivec2 cell = ivec2(floor(map_point));
+        vec2 inside = fract(map_point);
+        float distance_px = 1.0e20;
+        if (cell.x > 0 && differs(cell, cell + ivec2(-1, 0))) {
+          distance_px = min(distance_px, inside.x * u_zoom);
+        }
+        if (cell.x + 1 < u_map_size.x &&
+            differs(cell, cell + ivec2(1, 0))) {
+          distance_px = min(distance_px, (1.0 - inside.x) * u_zoom);
+        }
+        if (cell.y > 0 && differs(cell, cell + ivec2(0, -1))) {
+          distance_px = min(distance_px, inside.y * u_zoom);
+        }
+        if (cell.y + 1 < u_map_size.y &&
+            differs(cell, cell + ivec2(0, 1))) {
+          distance_px = min(distance_px, (1.0 - inside.y) * u_zoom);
+        }
+        float feather = max(0.5 / u_device_scale, 0.12);
+        float half_width = u_line_width * 0.5;
+        float exact_alpha = clamp(
+          (half_width + feather - distance_px) / (2.0 * feather),
+          0.0,
+          1.0
+        );
+        alpha = mix(
+          mip_alpha,
+          exact_alpha,
+          smoothstep(0.75, 1.25, physical_zoom)
+        );
+      }
+      if (alpha <= 0.001) discard;
+      out_color = vec4(vec3(alpha), alpha);
+    }
+  `;
+
+  try {
+    provinceBorderRenderer = {
+      available: true,
+      gl,
+      maskProgram: createBorderProgram(gl, fullscreenVertex, maskFragment),
+      screenProgram: createBorderProgram(gl, fullscreenVertex, screenFragment),
+      provinceTexture: gl.createTexture(),
+      maskTexture: gl.createTexture(),
+      maskFramebuffer: gl.createFramebuffer(),
+      vertexArray: gl.createVertexArray(),
+      width: 0,
+      height: 0,
+      textureReady: false,
+    };
+  } catch (error) {
+    console.error('province border WebGL initialization failed', error);
+    provinceBorderRenderer = { available: false, error: String(error) };
+  }
+  return provinceBorderRenderer;
+}
+
+function ensureProvinceBorderTextures(renderer) {
+  const { gl } = renderer;
+  if (renderer.width === state.width && renderer.height === state.height) return;
+  renderer.width = state.width;
+  renderer.height = state.height;
+  renderer.textureReady = false;
+
+  gl.bindTexture(gl.TEXTURE_2D, renderer.provinceTexture);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texImage2D(
+    gl.TEXTURE_2D, 0, gl.RGBA8, state.width, state.height, 0,
+    gl.RGBA, gl.UNSIGNED_BYTE, null,
+  );
+
+  gl.bindTexture(gl.TEXTURE_2D, renderer.maskTexture);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texImage2D(
+    gl.TEXTURE_2D, 0, gl.R8, state.width, state.height, 0,
+    gl.RED, gl.UNSIGNED_BYTE, null,
+  );
+
+  gl.bindFramebuffer(gl.FRAMEBUFFER, renderer.maskFramebuffer);
+  gl.framebufferTexture2D(
+    gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0,
+    gl.TEXTURE_2D, renderer.maskTexture, 0,
+  );
+  if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+    throw new Error('프로빈스 경계 마스크 framebuffer를 만들 수 없습니다.');
+  }
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+}
+
+function normalizedProvinceBorderBounds(bounds) {
+  if (!bounds) return null;
+  const x0 = Math.max(0, bounds.minX - 1);
+  const y0 = Math.max(0, bounds.minY - 1);
+  const x1 = Math.min(state.width - 1, bounds.maxX + 1);
+  const y1 = Math.min(state.height - 1, bounds.maxY + 1);
+  const width = x1 - x0 + 1;
+  const height = y1 - y0 + 1;
+  if (width * height > state.width * state.height * 0.4) return null;
+  return { x0, y0, width, height };
+}
+
+function uploadProvinceBorderPixels(renderer, bounds) {
+  const { gl } = renderer;
+  ensureProvinceBorderTextures(renderer);
+  const area = normalizedProvinceBorderBounds(bounds);
+  gl.bindTexture(gl.TEXTURE_2D, renderer.provinceTexture);
+  gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+
+  if (!renderer.textureReady || !area) {
+    gl.texSubImage2D(
+      gl.TEXTURE_2D, 0, 0, 0, state.width, state.height,
+      gl.RGBA, gl.UNSIGNED_BYTE, state.pixelBuf,
+    );
+    renderer.textureReady = true;
+    return null;
+  }
+
+  const pixels = new Uint8Array(area.width * area.height * 4);
+  const sourceStride = state.width * 4;
+  const targetStride = area.width * 4;
+  for (let row = 0; row < area.height; row++) {
+    const sourceStart = (area.y0 + row) * sourceStride + area.x0 * 4;
+    pixels.set(
+      state.pixelBuf.subarray(sourceStart, sourceStart + targetStride),
+      row * targetStride,
+    );
+  }
+  gl.texSubImage2D(
+    gl.TEXTURE_2D, 0, area.x0, area.y0, area.width, area.height,
+    gl.RGBA, gl.UNSIGNED_BYTE, pixels,
+  );
+  return area;
+}
+
+function rebuildProvinceBorderMask(renderer, area) {
+  const { gl } = renderer;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, renderer.maskFramebuffer);
+  gl.viewport(0, 0, state.width, state.height);
+  gl.disable(gl.BLEND);
+  if (area) {
+    gl.enable(gl.SCISSOR_TEST);
+    gl.scissor(area.x0, area.y0, area.width, area.height);
+  } else {
+    gl.disable(gl.SCISSOR_TEST);
+  }
+  gl.useProgram(renderer.maskProgram);
+  gl.bindVertexArray(renderer.vertexArray);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, renderer.provinceTexture);
+  gl.uniform1i(gl.getUniformLocation(renderer.maskProgram, 'u_provinces'), 0);
+  gl.uniform2i(
+    gl.getUniformLocation(renderer.maskProgram, 'u_map_size'),
+    state.width,
+    state.height,
+  );
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  gl.disable(gl.SCISSOR_TEST);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+  gl.bindTexture(gl.TEXTURE_2D, renderer.maskTexture);
+  gl.generateMipmap(gl.TEXTURE_2D);
+}
+
+function renderProvinceBorders(renderer) {
+  const { gl } = renderer;
+  const deviceScale = Math.max(1, window.devicePixelRatio || 1);
+  const cssWidth = Math.max(1, provinceBorderCanvas.clientWidth);
+  const cssHeight = Math.max(1, provinceBorderCanvas.clientHeight);
+  const bufferWidth = Math.max(1, Math.round(cssWidth * deviceScale));
+  const bufferHeight = Math.max(1, Math.round(cssHeight * deviceScale));
+  if (provinceBorderCanvas.width !== bufferWidth ||
+      provinceBorderCanvas.height !== bufferHeight) {
+    provinceBorderCanvas.width = bufferWidth;
+    provinceBorderCanvas.height = bufferHeight;
+  }
+
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, bufferWidth, bufferHeight);
+  gl.disable(gl.BLEND);
+  gl.clearColor(0, 0, 0, 0);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.useProgram(renderer.screenProgram);
+  gl.bindVertexArray(renderer.vertexArray);
+
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, renderer.provinceTexture);
+  gl.uniform1i(gl.getUniformLocation(renderer.screenProgram, 'u_provinces'), 0);
+  gl.activeTexture(gl.TEXTURE1);
+  gl.bindTexture(gl.TEXTURE_2D, renderer.maskTexture);
+  gl.uniform1i(gl.getUniformLocation(renderer.screenProgram, 'u_border_mask'), 1);
+  gl.uniform2i(
+    gl.getUniformLocation(renderer.screenProgram, 'u_map_size'),
+    state.width,
+    state.height,
+  );
+  gl.uniform2f(
+    gl.getUniformLocation(renderer.screenProgram, 'u_pan'),
+    state.panX,
+    state.panY,
+  );
+  gl.uniform1f(
+    gl.getUniformLocation(renderer.screenProgram, 'u_zoom'),
+    state.zoom,
+  );
+  gl.uniform1f(
+    gl.getUniformLocation(renderer.screenProgram, 'u_device_scale'),
+    deviceScale,
+  );
+  gl.uniform1f(
+    gl.getUniformLocation(renderer.screenProgram, 'u_framebuffer_height'),
+    bufferHeight,
+  );
+  const widthInput = $('#layer-province-border-width');
+  const lineWidth = Math.max(0.1, Number(widthInput?.value) || 0.65);
+  gl.uniform1f(
+    gl.getUniformLocation(renderer.screenProgram, 'u_line_width'),
+    lineWidth,
+  );
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+
+function addProvinceBorderDirtyBounds(points) {
+  if (!points || points.length === 0 || points.length > 500000) {
+    state.provinceBorderDirtyBounds = null;
+    return;
+  }
+  let minX = state.width;
+  let minY = state.height;
+  let maxX = -1;
+  let maxY = -1;
+  for (const point of points) {
+    const x = point[0];
+    const y = point[1];
+    if (x < minX) minX = x;
+    if (y < minY) minY = y;
+    if (x > maxX) maxX = x;
+    if (y > maxY) maxY = y;
+  }
+  if (maxX < 0) return;
+  const current = state.provinceBorderDirtyBounds;
+  if (!current) {
+    state.provinceBorderDirtyBounds = { minX, minY, maxX, maxY };
+  } else {
+    current.minX = Math.min(current.minX, minX);
+    current.minY = Math.min(current.minY, minY);
+    current.maxX = Math.max(current.maxX, maxX);
+    current.maxY = Math.max(current.maxY, maxY);
+  }
+}
+
+function scheduleProvinceBorderRender() {
+  const toggle = $('#layer-province-border-toggle');
+  if (!state.loaded || !toggle?.checked || provinceBorderFrame) return;
+  provinceBorderFrame = window.requestAnimationFrame(() => {
+    provinceBorderFrame = 0;
+    refreshProvinceBorders();
+  });
+}
+
+function markProvinceBordersDirty(points = null) {
+  const wasDirty = state.provinceBordersDirty;
+  state.provinceBordersDirty = true;
+  if (!points || (wasDirty && state.provinceBorderDirtyBounds === null)) {
+    state.provinceBorderDirtyBounds = null;
+  } else {
+    addProvinceBorderDirtyBounds(points);
+  }
+  scheduleProvinceBorderRender();
+}
+
+function refreshProvinceBorders(force = false) {
+  const toggle = $('#layer-province-border-toggle');
+  const enabled = Boolean(toggle && toggle.checked && state.loaded);
+  provinceBorderCanvas.style.display = enabled ? 'block' : 'none';
+  if (!enabled || !state.imageData) return;
+
+  const renderer = initProvinceBorderRenderer();
+  if (!renderer.available) {
+    toggle.checked = false;
+    provinceBorderCanvas.style.display = 'none';
+    setStatus(`GPU 프로빈스 테두리 사용 불가: ${renderer.error}`);
+    return;
+  }
+
+  try {
+    if (state.provinceBordersDirty || !renderer.textureReady) {
+      const area = uploadProvinceBorderPixels(
+        renderer,
+        state.provinceBorderDirtyBounds,
+      );
+      rebuildProvinceBorderMask(renderer, area);
+      state.provinceBordersDirty = false;
+      state.provinceBorderDirtyBounds = null;
+    }
+    if (force || renderer.textureReady) renderProvinceBorders(renderer);
+  } catch (error) {
+    console.error('province border render failed', error);
+    toggle.checked = false;
+    provinceBorderCanvas.style.display = 'none';
+    setStatus(`GPU 프로빈스 테두리 렌더링 실패: ${error}`);
+  }
+}
+
+function escapeHtmlText(value) {
+  return String(value).replace(/[&<>"']/g, character => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[character]));
+}
+
+function getReferenceLayer(id) {
+  return state.referenceLayers.find(layer => layer.id === id) || null;
+}
+
+function updateReferenceLayerElement(layer) {
+  if (!layer || !layer.element) return;
+  layer.element.style.left = `${layer.centerX - layer.width / 2}px`;
+  layer.element.style.top = `${layer.centerY - layer.height / 2}px`;
+  layer.element.style.width = `${layer.width}px`;
+  layer.element.style.height = `${layer.height}px`;
+  layer.element.style.transform = `rotate(${layer.rotation}deg)`;
+  layer.image.style.opacity = String(layer.opacity);
+  layer.element.style.zIndex = String(state.referenceLayers.indexOf(layer) + 1);
+  layer.element.classList.toggle('hidden', !layer.visible);
+  layer.element.classList.toggle(
+    'selected',
+    layer.id === state.selectedReferenceLayerId,
+  );
+}
+
+function createReferenceLayerElement(layer) {
+  const element = document.createElement('div');
+  element.className = 'reference-layer-object';
+  element.dataset.referenceId = String(layer.id);
+  layer.image.draggable = false;
+  element.appendChild(layer.image);
+
+  const frame = document.createElement('div');
+  frame.className = 'reference-selection-frame';
+  element.appendChild(frame);
+
+  const pivot = document.createElement('span');
+  pivot.className = 'reference-transform-pivot';
+  pivot.title = '변형 중심';
+  element.appendChild(pivot);
+
+  for (const handle of ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w', 'rotate']) {
+    const point = document.createElement('button');
+    point.type = 'button';
+    point.className = 'reference-transform-handle';
+    point.dataset.handle = handle;
+    point.setAttribute('aria-label', handle === 'rotate' ? '회전' : `크기 조절 ${handle}`);
+    element.appendChild(point);
+  }
+
+  layer.element = element;
+  referenceLayerHost.appendChild(element);
+  updateReferenceLayerElement(layer);
+}
+
+function selectReferenceLayer(id, refreshList = true) {
+  state.selectedReferenceLayerId = getReferenceLayer(id) ? id : null;
+  for (const layer of state.referenceLayers) updateReferenceLayerElement(layer);
+  if (refreshList) {
+    renderReferenceLayerList();
+  } else {
+    document.querySelectorAll('.reference-layer-item').forEach(item => {
+      item.classList.toggle(
+        'selected',
+        parseInt(item.dataset.referenceId, 10) === state.selectedReferenceLayerId,
+      );
+    });
+  }
+}
+
+function renderReferenceLayerList() {
+  const list = $('#reference-layer-list');
+  if (!list) return;
+  if (!state.referenceLayers.length) {
+    list.innerHTML = '<span class="reference-layer-empty">이미지를 놓으면 맵 위에 겹쳐집니다.</span>';
+    return;
+  }
+  list.innerHTML = state.referenceLayers.map(layer => {
+    const scale = Math.round((layer.width / layer.naturalWidth) * 100);
+    const selected = layer.id === state.selectedReferenceLayerId ? ' selected' : '';
+    return `
+      <div class="reference-layer-item${selected}" data-reference-id="${layer.id}">
+        <input class="reference-layer-visible" type="checkbox"
+               ${layer.visible ? 'checked' : ''} title="표시/숨김" />
+        <span class="reference-layer-name" title="${escapeHtmlText(layer.name)}">${escapeHtmlText(layer.name)}</span>
+        <input class="reference-layer-scale" type="number" min="1" max="2000" step="5"
+               value="${scale}" title="원본 기준 균일 크기 (%)" />
+        <button class="reference-layer-remove" title="레이어 삭제">×</button>
+        <label class="reference-layer-opacity">
+          <span>불투명도</span>
+          <input type="range" min="0" max="100" step="1"
+                 value="${Math.round(layer.opacity * 100)}" />
+          <span>${Math.round(layer.opacity * 100)}%</span>
+        </label>
+      </div>
+    `;
+  }).join('');
+}
+
+function clearReferenceLayers() {
+  for (const layer of state.referenceLayers) layer.element?.remove();
+  state.referenceLayers = [];
+  state.nextReferenceLayerId = 1;
+  state.selectedReferenceLayerId = null;
+  state.referenceTransform = null;
+  renderReferenceLayerList();
+}
+
+function deleteReferenceLayer(id) {
+  const layer = getReferenceLayer(id);
+  if (!layer) return;
+  layer.element?.remove();
+  state.referenceLayers = state.referenceLayers.filter(item => item.id !== id);
+  if (state.selectedReferenceLayerId === id) {
+    const next = state.referenceLayers[state.referenceLayers.length - 1];
+    state.selectedReferenceLayerId = next ? next.id : null;
+  }
+  state.referenceTransform = null;
+  for (const item of state.referenceLayers) updateReferenceLayerElement(item);
+  renderReferenceLayerList();
+  setStatus(`참조 이미지 레이어 삭제: ${layer.name}`);
+}
+
+async function addReferenceImage(file, dropX = state.width / 2, dropY = state.height / 2) {
+  const looksLikeImage = file && (
+    file.type.startsWith('image/') ||
+    /\.(png|jpe?g|bmp|gif|webp)$/i.test(file.name)
+  );
+  if (!state.loaded || !looksLikeImage) return;
+  const objectUrl = URL.createObjectURL(file);
+  const image = new Image();
+  try {
+    await new Promise((resolve, reject) => {
+      image.onload = resolve;
+      image.onerror = reject;
+      image.src = objectUrl;
+    });
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+
+  const initialScale = Math.min(
+    1,
+    (state.width * 0.6) / image.naturalWidth,
+    (state.height * 0.6) / image.naturalHeight,
+  );
+  const layer = {
+    id: state.nextReferenceLayerId++,
+    name: file.name,
+    image,
+    element: null,
+    naturalWidth: image.naturalWidth,
+    naturalHeight: image.naturalHeight,
+    centerX: dropX,
+    centerY: dropY,
+    width: Math.max(1, image.naturalWidth * initialScale),
+    height: Math.max(1, image.naturalHeight * initialScale),
+    rotation: 0,
+    opacity: 0.6,
+    visible: true,
+  };
+  state.referenceLayers.push(layer);
+  createReferenceLayerElement(layer);
+  selectReferenceLayer(layer.id, false);
+  applyTransform();
+  renderReferenceLayerList();
+  setMode('reference');
+  setStatus(`참조 이미지 레이어 추가: ${file.name}`);
+}
+
+function beginReferenceTransform(event) {
+  if (state.mode !== 'reference' || event.button !== 0) return;
+  const element = event.target.closest('.reference-layer-object');
+  if (!element) return;
+  const layer = getReferenceLayer(parseInt(element.dataset.referenceId, 10));
+  if (!layer || !layer.visible) return;
+
+  selectReferenceLayer(layer.id);
+  const handleElement = event.target.closest('.reference-transform-handle');
+  const handle = handleElement?.dataset.handle || 'move';
+  const [mapX, mapY] = screenToMapPoint(event.clientX, event.clientY);
+  const centerAngle = Math.atan2(mapY - layer.centerY, mapX - layer.centerX);
+  state.referenceTransform = {
+    layerId: layer.id,
+    handle,
+    startMapX: mapX,
+    startMapY: mapY,
+    startCenterX: layer.centerX,
+    startCenterY: layer.centerY,
+    startWidth: layer.width,
+    startHeight: layer.height,
+    startRotation: layer.rotation,
+    startCenterAngle: centerAngle,
+  };
+  event.preventDefault();
+  event.stopPropagation();
+}
+
+function updateReferenceTransform(clientX, clientY) {
+  const transform = state.referenceTransform;
+  if (!transform) return;
+  const layer = getReferenceLayer(transform.layerId);
+  if (!layer) {
+    state.referenceTransform = null;
+    return;
+  }
+  const [mapX, mapY] = screenToMapPoint(clientX, clientY);
+  const dx = mapX - transform.startMapX;
+  const dy = mapY - transform.startMapY;
+
+  if (transform.handle === 'move') {
+    layer.centerX = transform.startCenterX + dx;
+    layer.centerY = transform.startCenterY + dy;
+  } else if (transform.handle === 'rotate') {
+    const angle = Math.atan2(
+      mapY - transform.startCenterY,
+      mapX - transform.startCenterX,
+    );
+    layer.rotation = transform.startRotation +
+      (angle - transform.startCenterAngle) * 180 / Math.PI;
+  } else {
+    const radians = transform.startRotation * Math.PI / 180;
+    const cos = Math.cos(radians);
+    const sin = Math.sin(radians);
+    const localDx = dx * cos + dy * sin;
+    const localDy = -dx * sin + dy * cos;
+    const handle = transform.handle;
+    const minimumSize = Math.max(2, 6 / state.zoom);
+    let width = transform.startWidth;
+    let height = transform.startHeight;
+    let centerShiftX = 0;
+    let centerShiftY = 0;
+
+    if (handle.includes('e')) {
+      width = Math.max(minimumSize, transform.startWidth + localDx);
+      centerShiftX = (width - transform.startWidth) / 2;
+    } else if (handle.includes('w')) {
+      width = Math.max(minimumSize, transform.startWidth - localDx);
+      centerShiftX = -(width - transform.startWidth) / 2;
+    }
+    if (handle.includes('s')) {
+      height = Math.max(minimumSize, transform.startHeight + localDy);
+      centerShiftY = (height - transform.startHeight) / 2;
+    } else if (handle.includes('n')) {
+      height = Math.max(minimumSize, transform.startHeight - localDy);
+      centerShiftY = -(height - transform.startHeight) / 2;
+    }
+
+    layer.width = width;
+    layer.height = height;
+    layer.centerX = transform.startCenterX +
+      centerShiftX * cos - centerShiftY * sin;
+    layer.centerY = transform.startCenterY +
+      centerShiftX * sin + centerShiftY * cos;
+  }
+
+  updateReferenceLayerElement(layer);
 }
 
 // ---------- 도구 전환 ----------
@@ -223,22 +1562,86 @@ function setTool(name) {
   $('#btn-tool-brush').classList.toggle('active', name === 'brush');
   $('#btn-tool-fill').classList.toggle('active', name === 'fill');
   canvas.style.cursor = name === 'fill' ? 'cell' : 'crosshair';
-  setStatus(name === 'fill' ? '도구: 페인트통 (G)' : '도구: 브러시 (B)');
+  const target = state.mode === 'terrain' ? '지형 ' : '';
+  setStatus(name === 'fill' ? `${target}도구: 페인트통 (G)` : `${target}도구: 브러시 (B)`);
+}
+
+function setSupportEditorMenuOpen(open) {
+  const trigger = $('#btn-support-editors');
+  const menu = $('#support-editor-menu');
+  if (!trigger || !menu) return;
+  if (open) {
+    menu.hidden = false;
+    const rect = trigger.getBoundingClientRect();
+    const left = Math.min(
+      Math.max(8, rect.left),
+      Math.max(8, window.innerWidth - menu.offsetWidth - 8),
+    );
+    menu.style.left = `${left}px`;
+    menu.style.top = `${rect.bottom + 5}px`;
+  } else {
+    menu.hidden = true;
+  }
+  trigger.setAttribute('aria-expanded', open ? 'true' : 'false');
 }
 
 // ---------- 탭/모드 전환 ----------
 function setMode(name) {
-  if (name !== 'province' && name !== 'state' && name !== 'split' && name !== 'adjacency') return;
+  if (!['province', 'state', 'split', 'adjacency', 'terrain', 'heightmap', 'rivers', 'supply', 'reference'].includes(name)) return;
+  if (name === 'terrain' && !state.terrainEditable) {
+    setStatus('8비트 인덱스 terrain.bmp를 로드해야 지형 편집을 사용할 수 있습니다.');
+    return;
+  }
+  if (name === 'heightmap' && !state.heightmapEditable) {
+    setStatus('같은 크기의 8비트 그레이스케일 heightmap.bmp가 필요합니다.');
+    return;
+  }
+  if (name === 'rivers' && !state.riversEditable) {
+    setStatus('같은 크기의 8비트 인덱스 rivers.bmp가 필요합니다.');
+    return;
+  }
+  if (name === 'supply' && !state.supplyEditable) {
+    setStatus('supply_nodes.txt와 railways.txt가 모두 필요합니다.');
+    return;
+  }
   state.mode = name;
   $('#tab-province').classList.toggle('active', name === 'province');
   $('#tab-state').classList.toggle('active', name === 'state');
   $('#tab-split').classList.toggle('active', name === 'split');
+  $('#tab-terrain').classList.toggle('active', name === 'terrain');
+  $('#tab-heightmap').classList.toggle('active', name === 'heightmap');
+  $('#tab-rivers').classList.toggle('active', name === 'rivers');
+  $('#tab-supply').classList.toggle('active', name === 'supply');
+  $('#tab-reference').classList.toggle('active', name === 'reference');
+  $('#btn-support-editors').classList.toggle(
+    'active', ['terrain', 'heightmap', 'rivers', 'supply'].includes(name),
+  );
+  setSupportEditorMenuOpen(false);
   const tabAdj = $('#tab-adjacency');
   if (tabAdj) tabAdj.classList.toggle('active', name === 'adjacency');
 
   // 모드별 UI 가시성 (hidden 속성으로 통일)
-  document.querySelectorAll('.brush-only').forEach(el => {
+  document.querySelectorAll('.paint-only').forEach(el => {
+    el.hidden = !['province', 'terrain', 'heightmap', 'rivers'].includes(name);
+  });
+  document.querySelectorAll('.province-only').forEach(el => {
     el.hidden = (name !== 'province');
+  });
+  document.querySelectorAll('.terrain-only').forEach(el => {
+    el.hidden = (name !== 'terrain');
+  });
+  document.querySelectorAll('.heightmap-only').forEach(el => {
+    el.hidden = (name !== 'heightmap');
+  });
+  document.querySelectorAll('.rivers-only').forEach(el => {
+    el.hidden = (name !== 'rivers');
+  });
+  document.querySelectorAll('.supply-only').forEach(el => {
+    el.hidden = (name !== 'supply');
+  });
+  $('#btn-tool-fill').hidden = (name === 'heightmap' || name === 'rivers');
+  document.querySelectorAll('.reference-only').forEach(el => {
+    el.hidden = (name !== 'reference');
   });
   document.querySelectorAll('.state-only').forEach(el => {
     el.hidden = (name !== 'state');
@@ -279,12 +1682,47 @@ function setMode(name) {
     } else if (name === 'adjacency') {
       ctx.putImageData(state.imageData, 0, 0);
       canvas.style.cursor = 'crosshair';
+    } else if (name === 'terrain') {
+      ctx.putImageData(state.imageData, 0, 0);
+      canvas.style.cursor = state.tool === 'fill' ? 'cell' : 'crosshair';
+      updateTerrainPaletteLabel();
+    } else if (name === 'heightmap') {
+      ctx.putImageData(state.imageData, 0, 0);
+      canvas.style.cursor = 'crosshair';
+      updateHeightmapBrushReadout();
+    } else if (name === 'rivers') {
+      ctx.putImageData(state.imageData, 0, 0);
+      canvas.style.cursor = 'crosshair';
+    } else if (name === 'supply') {
+      ctx.putImageData(state.imageData, 0, 0);
+      canvas.style.cursor = 'pointer';
+      ensureSupplyCentroids();
+      renderSupplyOverlay();
+    } else if (name === 'reference') {
+      ctx.putImageData(state.imageData, 0, 0);
+      canvas.style.cursor = 'default';
     } else {
       ctx.putImageData(state.imageData, 0, 0);
       canvas.style.cursor = state.tool === 'fill' ? 'cell' : 'crosshair';
     }
   }
-  const labels = { province: '프로빈스 편집', state: '스테이트 할당', split: '자동 분할', adjacency: '인접 연결' };
+  state.referenceTransform = null;
+  $('#canvas-area').classList.toggle('reference-transform-mode', name === 'reference');
+  for (const layer of state.referenceLayers) updateReferenceLayerElement(layer);
+  refreshTerrainLayerVisibility();
+  refreshSupportEditorLayers();
+  protectCanvas.style.display = ['terrain', 'heightmap', 'rivers', 'supply'].includes(name) ? 'none' : 'block';
+  const labels = {
+    province: '프로빈스 편집',
+    state: '스테이트 할당',
+    split: '자동 분할',
+    adjacency: '인접 연결',
+    terrain: '지형 편집',
+    heightmap: '높이맵 편집',
+    rivers: '강 편집',
+    supply: '보급허브와 철도 편집',
+    reference: '이미지 레이어 선택·자유 변형',
+  };
   setStatus(`모드: ${labels[name]}`);
 }
 
@@ -869,6 +2307,7 @@ async function performFloodFill(x, y) {
     setPixelRaw(px, py, nr, ng, nb);
   }
   flushCanvas();
+  markProvinceBordersDirty(changes);
   state.stateImageDirty = true;
 
   // Undo 스택 등록 (기존 브러시와 같은 포맷: [x, y, oldR, oldG, oldB])
@@ -882,6 +2321,33 @@ async function performFloodFill(x, y) {
   // 변경된 좌표만 후보로 넘김 (changes 첫 두 요소가 x, y).
   const pixelsForScan = changes.map(c => [c[0], c[1]]);
   scanXcrossingsNear(pixelsForScan);
+}
+
+async function performTerrainFloodFill(x, y) {
+  if (!state.terrainEditable ||
+      x < 0 || y < 0 || x >= state.width || y >= state.height) return;
+  setStatus('지형 영역 채우는 중...');
+  const result = await window.pywebview.api.flood_fill_terrain(
+    x, y, state.currentTerrainIndex,
+  );
+  if (!result || !result.ok) {
+    setStatus(`지형 채우기 실패: ${result ? result.error : 'unknown'}`);
+    return;
+  }
+  const changes = result.changedPixels || [];
+  if (!changes.length) {
+    setStatus('변경된 지형 픽셀이 없습니다.');
+    return;
+  }
+
+  for (const [px, py] of changes) {
+    setTerrainPixelRaw(px, py, state.currentTerrainIndex);
+  }
+  flushTerrainCanvas();
+  state.undoStack.push({ kind: 'terrain', changes });
+  state.redoStack = [];
+  updateUndoButtons();
+  setStatus(`지형 채우기 완료: ${changes.length} 픽셀`);
 }
 
 // ---------- 입력 처리 ----------
@@ -901,6 +2367,11 @@ function onMouseDown(e) {
   }
 
   if (e.button === 0) {
+    if (state.mode === 'reference') {
+      selectReferenceLayer(null);
+      setStatus('이미지 레이어 선택 해제 — 이미지를 클릭하거나 레이어 목록에서 선택하세요.');
+      return;
+    }
     // 스테이트 할당 모드 우선 분기
     if (state.mode === 'state') {
       handleStateModeClick(x, y, e.shiftKey);
@@ -921,6 +2392,52 @@ function onMouseDown(e) {
       }
       return;
     }
+    if (state.mode === 'heightmap') {
+      if (x < 0 || y < 0 || x >= state.width || y >= state.height) return;
+      state.brushDown = true;
+      state.activeStrokeKind = 'heightmap';
+      state.heightmapStrokeOriginals = new Map();
+      state.lastPaintX = x + 0.5;
+      state.lastPaintY = y + 0.5;
+      paintHeightmapBrush(x + 0.5, y + 0.5);
+      flushHeightmapCanvas();
+      return;
+    }
+    if (state.mode === 'rivers') {
+      if (x < 0 || y < 0 || x >= state.width || y >= state.height) return;
+      state.brushDown = true;
+      state.activeStrokeKind = 'rivers';
+      state.heightmapStrokeOriginals = new Map();
+      state.lastPaintX = x;
+      state.lastPaintY = y;
+      paintRiverPixel(x, y);
+      flushRiversCanvas();
+      return;
+    }
+    if (state.mode === 'supply') {
+      handleSupplyClick(x, y);
+      return;
+    }
+    if (state.mode === 'terrain') {
+      const useFill = e.shiftKey || state.tool === 'fill';
+      if (useFill) {
+        performTerrainFloodFill(x, y);
+        return;
+      }
+      state.brushDown = true;
+      state.activeStrokeKind = 'terrain';
+      state.strokeChanges = [];
+      state.strokePixels = [];
+      state.lastPaintX = x;
+      state.lastPaintY = y;
+      state.strokeLockTerrainIndex = (
+        x >= 0 && y >= 0 && x < state.width && y < state.height
+          ? getTerrainIndex(x, y) : null
+      );
+      paintTerrainPixel(x, y);
+      flushTerrainCanvas();
+      return;
+    }
 
     // 프로빈스 편집 모드: 도구 분기
     const useFill = e.shiftKey || state.tool === 'fill';
@@ -929,6 +2446,7 @@ function onMouseDown(e) {
       return;
     }
     state.brushDown = true;
+    state.activeStrokeKind = 'province';
     state.strokeChanges = [];
     state.strokePixels = [];
     state.lastPaintX = x;
@@ -956,6 +2474,11 @@ function onMouseDown(e) {
 function onMouseMove(e) {
   if (!state.loaded) return;
 
+  if (state.referenceTransform) {
+    updateReferenceTransform(e.clientX, e.clientY);
+    return;
+  }
+
   if (state.rightDown) {
     // 일정 거리 이상 움직이면 팬 모드로 전환
     const dx = e.clientX - state.rightStart.x;
@@ -972,51 +2495,138 @@ function onMouseMove(e) {
   // 커서 정보 + Delete 키 동작용 좌표 추적
   const [px, py] = screenToPixel(e.clientX, e.clientY);
   state.lastCursorXY = [px, py];
+  updateSupportBrushPreview(e.clientX, e.clientY);
   if (px >= 0 && py >= 0 && px < state.width && py < state.height) {
     const [r, g, b] = getPixel(px, py);
-    $('#cursor-info').textContent = `(${px}, ${py})  RGB(${r}, ${g}, ${b})`;
+    if (state.mode === 'heightmap' && state.heightmapEditable) {
+      const value = getHeightmapValue(px, py);
+      $('#cursor-info').textContent =
+        `(${px}, ${py})  높이 ${value} / ${(value / 10).toFixed(1)}`;
+    } else if (state.mode === 'rivers' && state.riversEditable) {
+      const index = getRiverIndex(px, py);
+      $('#cursor-info').textContent = `(${px}, ${py})  rivers.bmp #${index}`;
+    } else if (state.mode === 'terrain' && state.terrainEditable) {
+      const terrainIndex = getTerrainIndex(px, py);
+      $('#cursor-info').textContent =
+        `(${px}, ${py})  지형 #${terrainIndex} / 맵 RGB(${r}, ${g}, ${b})`;
+    } else {
+      $('#cursor-info').textContent = `(${px}, ${py})  RGB(${r}, ${g}, ${b})`;
+    }
   } else {
     $('#cursor-info').textContent = '-';
   }
 
-  if (state.brushDown) {
-    paintLine(state.lastPaintX, state.lastPaintY, px, py);
-    state.lastPaintX = px;
-    state.lastPaintY = py;
-    flushCanvas();
+  if (state.brushDown && px >= 0 && py >= 0 && px < state.width && py < state.height) {
+    if (state.activeStrokeKind === 'heightmap') {
+      paintHeightmapLine(state.lastPaintX, state.lastPaintY, px + 0.5, py + 0.5);
+    } else if (state.activeStrokeKind === 'rivers') {
+      if (state.currentRiverIndex === 'erase' || Number(state.currentRiverIndex) >= 3) {
+        paintRiverOrthogonalLine(state.lastPaintX, state.lastPaintY, px, py);
+      }
+    } else if (state.activeStrokeKind === 'terrain') {
+      paintTerrainLine(state.lastPaintX, state.lastPaintY, px, py);
+    } else {
+      paintLine(state.lastPaintX, state.lastPaintY, px, py);
+    }
+    state.lastPaintX = state.activeStrokeKind === 'heightmap' ? px + 0.5 : px;
+    state.lastPaintY = state.activeStrokeKind === 'heightmap' ? py + 0.5 : py;
+    if (state.activeStrokeKind === 'heightmap') flushHeightmapCanvas();
+    else if (state.activeStrokeKind === 'rivers') flushRiversCanvas();
+    else if (state.activeStrokeKind === 'terrain') flushTerrainCanvas();
+    else flushCanvas();
   }
 }
 
 async function onMouseUp(e) {
   if (!state.loaded) return;
 
+  if (e.button === 0 && state.referenceTransform) {
+    const layer = getReferenceLayer(state.referenceTransform.layerId);
+    state.referenceTransform = null;
+    renderReferenceLayerList();
+    if (layer) {
+      setStatus(
+        `이미지 변형: ${layer.name} / ${Math.round(layer.width)}×${Math.round(layer.height)}px / ${Math.round(layer.rotation)}°`,
+      );
+    }
+    return;
+  }
+
   if (e.button === 0 && state.brushDown) {
     state.brushDown = false;
+    const strokeKind = state.activeStrokeKind || 'province';
+    state.activeStrokeKind = null;
+    if (strokeKind === 'heightmap' || strokeKind === 'rivers') {
+      const originals = state.heightmapStrokeOriginals;
+      state.heightmapStrokeOriginals = new Map();
+      if (originals.size > 0) {
+        const oldChanges = [];
+        const newChanges = [];
+        for (const [offset, oldValue] of originals) {
+          const x = offset % state.width;
+          const y = Math.floor(offset / state.width);
+          const newValue = strokeKind === 'heightmap'
+            ? getHeightmapValue(x, y)
+            : getRiverIndex(x, y);
+          oldChanges.push([x, y, oldValue]);
+          newChanges.push([x, y, newValue]);
+        }
+        state.undoStack.push({ kind: strokeKind, changes: oldChanges });
+        state.redoStack = [];
+        updateUndoButtons();
+        if (strokeKind === 'heightmap') markWorldNormalStale();
+        try {
+          if (strokeKind === 'heightmap') {
+            await window.pywebview.api.apply_heightmap_changes(newChanges);
+            setStatus(`높이맵 브러시: ${newChanges.length}픽셀 변경`);
+          } else {
+            await window.pywebview.api.apply_rivers_changes(newChanges);
+            setStatus(`강 편집: ${newChanges.length}픽셀 변경 · 저장 전 규칙 검사를 권장합니다.`);
+          }
+        } catch (err) {
+          console.error(`${strokeKind} backend sync failed`, err);
+          setStatus(`${strokeKind} 변경을 백엔드에 반영하지 못했습니다.`);
+        }
+      }
+      return;
+    }
     const wasLocked = state.strokeLockRgb;
     // 스트로크 종료 → 잠금 해제 (다음 마우스 다운에서 새로 설정됨)
     state.strokeLockRgb = null;
+    state.strokeLockTerrainIndex = null;
 
     if (state.strokeChanges.length > 0) {
       // Undo 스택에 한 스트로크로 push
-      state.undoStack.push({ changes: state.strokeChanges });
+      state.undoStack.push({ kind: strokeKind, changes: state.strokeChanges });
       state.redoStack = [];
-      // 백엔드에도 반영 (부모 추적용으로 옛 RGB도 같이 전달)
+      // 백엔드에도 반영
       try {
-        const oldRgbs = state.strokeChanges.map(c => [c[2], c[3], c[4]]);
-        await window.pywebview.api.apply_stroke(
-          state.strokePixels,
-          state.currentRgb,
-          state.protectLakes,
-          state.protectSea,
-          oldRgbs,
-        );
+        if (strokeKind === 'terrain') {
+          await window.pywebview.api.apply_terrain_stroke(
+            state.strokePixels,
+            state.currentTerrainIndex,
+          );
+        } else {
+          const oldRgbs = state.strokeChanges.map(c => [c[2], c[3], c[4]]);
+          await window.pywebview.api.apply_stroke(
+            state.strokePixels,
+            state.currentRgb,
+            state.protectLakes,
+            state.protectSea,
+            oldRgbs,
+          );
+        }
       } catch (err) {
-        console.error('apply_stroke failed', err);
+        console.error('stroke backend sync failed', err);
       }
       updateUndoButtons();
-      // 스트로크 종료 직후 국소 X-crossing 검사 (변경된 픽셀 주변)
-      scanXcrossingsNear(state.strokePixels);
-    } else if (wasLocked) {
+      if (strokeKind === 'province') {
+        markProvinceBordersDirty(state.strokePixels);
+        scanXcrossingsNear(state.strokePixels);
+      } else {
+        setStatus(`지형 브러시: ${state.strokeChanges.length} 픽셀 변경`);
+      }
+    } else if (wasLocked && strokeKind === 'province') {
       // 변경된 픽셀이 0이면서 잠금이 있었다 = 시작 픽셀이 보호 대상이었거나
       // 새 색이 잠금색과 같았던 경우. 사용자에게 알려준다.
       const key = rgbKey(wasLocked[0], wasLocked[1], wasLocked[2]);
@@ -1038,6 +2648,32 @@ async function onMouseUp(e) {
       }
       // 짧은 우클릭 → 스포이드 (다른 모드)
       const [x, y] = screenToPixel(e.clientX, e.clientY);
+      if (state.mode === 'terrain' && state.terrainEditable &&
+          x >= 0 && y >= 0 && x < state.width && y < state.height) {
+        state.currentTerrainIndex = getTerrainIndex(x, y);
+        const select = $('#terrain-palette-select');
+        if (select) select.value = String(state.currentTerrainIndex);
+        updateTerrainPaletteLabel();
+        const entry = terrainPaletteEntry();
+        setStatus(`지형 스포이드: #${state.currentTerrainIndex}${entry && entry.name ? ` ${entry.name}` : ''}`);
+        return;
+      }
+      if (state.mode === 'heightmap' && state.heightmapEditable &&
+          x >= 0 && y >= 0 && x < state.width && y < state.height) {
+        const value = getHeightmapValue(x, y);
+        $('#height-brush-value').value = String(value);
+        updateHeightmapBrushReadout();
+        setStatus(`높이맵 스포이드: ${value} / ${(value / 10).toFixed(1)}`);
+        return;
+      }
+      if (state.mode === 'rivers' && state.riversEditable &&
+          x >= 0 && y >= 0 && x < state.width && y < state.height) {
+        const index = getRiverIndex(x, y);
+        state.currentRiverIndex = index <= 11 ? index : 'erase';
+        $('#river-palette-select').value = String(state.currentRiverIndex);
+        setStatus(index <= 11 ? `강 스포이드: 팔레트 #${index}` : `강 스포이드: 지우개`);
+        return;
+      }
       const result = await window.pywebview.api.pick_color_at(x, y);
       if (result && result.ok) {
         state.currentRgb = result.rgb;
@@ -1076,6 +2712,11 @@ function onWheel(e) {
 }
 
 function onKeyDown(e) {
+  if (e.key === 'Escape' && !$('#support-editor-menu')?.hidden) {
+    setSupportEditorMenuOpen(false);
+    e.preventDefault();
+    return;
+  }
   if (!state.loaded) return;
   if (e.ctrlKey && e.key.toLowerCase() === 'z') {
     e.preventDefault();
@@ -1099,13 +2740,21 @@ function onKeyDown(e) {
     // 도구 단축키 (Ctrl/Alt/Meta 안 눌렸을 때만, 입력 중 아닐 때만)
     // 모드 전환은 툴바 탭 버튼만 사용 (숫자키는 입력 충돌 위험으로 제거).
     const k = e.key.toLowerCase();
-    if (k === 'b' && state.mode === 'province') {
+    if (k === 'b' && (state.mode === 'province' || state.mode === 'terrain')) {
       e.preventDefault();
       setTool('brush');
-    } else if (k === 'g' && state.mode === 'province') {
+    } else if (k === 'g' && (state.mode === 'province' || state.mode === 'terrain')) {
       e.preventDefault();
       setTool('fill');
-    } else if (e.key === 'Delete') {
+    } else if ((e.key === 'Delete' || e.key === 'Backspace') &&
+               state.mode === 'reference' && state.selectedReferenceLayerId !== null) {
+      e.preventDefault();
+      deleteReferenceLayer(state.selectedReferenceLayerId);
+    } else if (e.key === 'Escape' && state.mode === 'reference') {
+      e.preventDefault();
+      selectReferenceLayer(null);
+      setStatus('이미지 레이어 선택 해제');
+    } else if (e.key === 'Delete' && state.mode === 'province') {
       // 커서 위치 프로빈스를 인접 흡수(=삭제). 19000개 한도 관리용.
       e.preventDefault();
       deleteProvinceUnderCursor();
@@ -1152,6 +2801,7 @@ async function deleteProvinceUnderCursor() {
     setPixelRaw(c[0], c[1], c[5], c[6], c[7]);
   }
   flushCanvas();
+  markProvinceBordersDirty(changes);
   // Undo 스택 등록 (changes = [x,y,oR,oG,oB,nR,nG,nB] → 표준 5-튜플로 압축)
   state.undoStack.push({
     changes: changes.map(c => [c[0], c[1], c[2], c[3], c[4]]),
@@ -1196,16 +2846,51 @@ function updateProvinceCountLabel(count) {
 function undo() {
   const stroke = state.undoStack.pop();
   if (!stroke) return;
+  if (stroke.kind === 'heightmap' || stroke.kind === 'rivers') {
+    const redoChanges = [];
+    for (const [x, y, value] of stroke.changes) {
+      const current = stroke.kind === 'heightmap'
+        ? getHeightmapValue(x, y)
+        : getRiverIndex(x, y);
+      redoChanges.push([x, y, current]);
+      if (stroke.kind === 'heightmap') setHeightmapPixelRaw(x, y, value);
+      else setRiverPixelRaw(x, y, value);
+    }
+    state.redoStack.push({ kind: stroke.kind, changes: redoChanges });
+    if (stroke.kind === 'heightmap') {
+      flushHeightmapCanvas();
+      markWorldNormalStale();
+      syncHeightmapChangesToBackend(stroke.changes);
+    } else {
+      flushRiversCanvas();
+      syncRiversChangesToBackend(stroke.changes);
+    }
+    updateUndoButtons();
+    return;
+  }
+  if (stroke.kind === 'terrain') {
+    const redoChanges = [];
+    for (const [x, y, terrainIndex] of stroke.changes) {
+      redoChanges.push([x, y, getTerrainIndex(x, y)]);
+      setTerrainPixelRaw(x, y, terrainIndex);
+    }
+    state.redoStack.push({ kind: 'terrain', changes: redoChanges });
+    flushTerrainCanvas();
+    syncTerrainChangesToBackend(stroke.changes);
+    updateUndoButtons();
+    return;
+  }
   const redoChanges = [];
   for (const [x, y, r, g, b] of stroke.changes) {
     const cur = getPixel(x, y);
     redoChanges.push([x, y, cur[0], cur[1], cur[2]]);
     setPixelRaw(x, y, r, g, b);
   }
-  state.redoStack.push({ changes: redoChanges });
+  state.redoStack.push({ kind: 'province', changes: redoChanges });
   flushCanvas();
   syncPixelGroupToBackend(stroke.changes);
   updateUndoButtons();
+  markProvinceBordersDirty(stroke.changes);
   // 마커 갱신
   scanXcrossingsNear(stroke.changes.map(c => [c[0], c[1]]));
 }
@@ -1213,17 +2898,78 @@ function undo() {
 function redo() {
   const stroke = state.redoStack.pop();
   if (!stroke) return;
+  if (stroke.kind === 'heightmap' || stroke.kind === 'rivers') {
+    const undoChanges = [];
+    for (const [x, y, value] of stroke.changes) {
+      const current = stroke.kind === 'heightmap'
+        ? getHeightmapValue(x, y)
+        : getRiverIndex(x, y);
+      undoChanges.push([x, y, current]);
+      if (stroke.kind === 'heightmap') setHeightmapPixelRaw(x, y, value);
+      else setRiverPixelRaw(x, y, value);
+    }
+    state.undoStack.push({ kind: stroke.kind, changes: undoChanges });
+    if (stroke.kind === 'heightmap') {
+      flushHeightmapCanvas();
+      markWorldNormalStale();
+      syncHeightmapChangesToBackend(stroke.changes);
+    } else {
+      flushRiversCanvas();
+      syncRiversChangesToBackend(stroke.changes);
+    }
+    updateUndoButtons();
+    return;
+  }
+  if (stroke.kind === 'terrain') {
+    const undoChanges = [];
+    for (const [x, y, terrainIndex] of stroke.changes) {
+      undoChanges.push([x, y, getTerrainIndex(x, y)]);
+      setTerrainPixelRaw(x, y, terrainIndex);
+    }
+    state.undoStack.push({ kind: 'terrain', changes: undoChanges });
+    flushTerrainCanvas();
+    syncTerrainChangesToBackend(stroke.changes);
+    updateUndoButtons();
+    return;
+  }
   const undoChanges = [];
   for (const [x, y, r, g, b] of stroke.changes) {
     const cur = getPixel(x, y);
     undoChanges.push([x, y, cur[0], cur[1], cur[2]]);
     setPixelRaw(x, y, r, g, b);
   }
-  state.undoStack.push({ changes: undoChanges });
+  state.undoStack.push({ kind: 'province', changes: undoChanges });
   flushCanvas();
   syncPixelGroupToBackend(stroke.changes);
   updateUndoButtons();
+  markProvinceBordersDirty(stroke.changes);
   scanXcrossingsNear(stroke.changes.map(c => [c[0], c[1]]));
+}
+
+async function syncTerrainChangesToBackend(changes) {
+  try {
+    await window.pywebview.api.apply_terrain_changes(
+      changes.map(change => [change[0], change[1], change[2]]),
+    );
+  } catch (err) {
+    console.error('terrain undo/redo backend sync failed', err);
+  }
+}
+
+async function syncHeightmapChangesToBackend(changes) {
+  try {
+    await window.pywebview.api.apply_heightmap_changes(changes);
+  } catch (err) {
+    console.error('heightmap undo/redo backend sync failed', err);
+  }
+}
+
+async function syncRiversChangesToBackend(changes) {
+  try {
+    await window.pywebview.api.apply_rivers_changes(changes);
+  } catch (err) {
+    console.error('rivers undo/redo backend sync failed', err);
+  }
 }
 
 async function syncPixelGroupToBackend(changes) {
@@ -1267,11 +3013,28 @@ async function onOpenClick() {
 }
 
 async function applyLoadedMap(result) {
+  clearReferenceLayers();
   state.width = result.width;
   state.height = result.height;
   state.states = result.states || [];
   state.regions = result.regions || [];
   state.continents = result.continents || [];
+  state.terrainEditable = Boolean(result.terrainEditable);
+  state.terrainPalette = result.terrainPalette || [];
+  state.heightmapEditable = Boolean(result.heightmapEditable);
+  state.worldNormalAvailable = Boolean(result.worldNormalAvailable);
+  state.worldNormalStale = Boolean(result.worldNormalStale);
+  state.riversEditable = Boolean(result.riversEditable);
+  state.supplyEditable = Boolean(result.supplyEditable);
+  state.supplyNodes = (result.supplyNodes || []).map(node => ({
+    level: Number(node.level), province: Number(node.province),
+  }));
+  state.railways = (result.railways || []).map(railway => ({
+    level: Number(railway.level),
+    provinces: (railway.provinces || []).map(Number),
+  }));
+  state.supplyCentroids = null;
+  state.supplyRailDraft = [];
 
   state.lakeRgbSet = new Set((result.lakeRgbs || []).map(([r, g, b]) => rgbKey(r, g, b)));
   state.seaRgbSet = new Set((result.seaRgbs || []).map(([r, g, b]) => rgbKey(r, g, b)));
@@ -1298,14 +3061,111 @@ async function applyLoadedMap(result) {
   overlayCanvas.height = state.height;
   protectCanvas.width = state.width;
   protectCanvas.height = state.height;
+  heightmapLayerCanvas.width = state.width;
+  heightmapLayerCanvas.height = state.height;
   riversLayerCanvas.width = state.width;
   riversLayerCanvas.height = state.height;
   terrainLayerCanvas.width = state.width;
   terrainLayerCanvas.height = state.height;
+  supplySvg.setAttribute('width', String(state.width));
+  supplySvg.setAttribute('height', String(state.height));
 
   // 레이어 BMP들을 비동기 로드 (실패해도 본체에 영향 없음)
-  loadOverlayLayer(riversLayerCanvas, riversLayerCtx, result.riversImageDataUrl);
-  loadOverlayLayer(terrainLayerCanvas, terrainLayerCtx, result.terrainImageDataUrl);
+  try {
+    await loadHeightmapEditorData(result.heightmapImageDataUrl);
+  } catch (error) {
+    console.warn('heightmap editor data load failed', error);
+    state.heightmapEditable = false;
+    state.heightmapImageData = null;
+    state.heightmapPixelBuf = null;
+    state.heightmapValueBuf = null;
+  }
+  try {
+    await loadRiversEditorData(result.riversIndexDataUrl);
+  } catch (error) {
+    console.warn('rivers editor data load failed', error);
+    state.riversEditable = false;
+    state.riversImageData = null;
+    state.riversPixelBuf = null;
+    state.riversIndexBuf = null;
+    loadOverlayLayer(riversLayerCanvas, riversLayerCtx, result.riversImageDataUrl);
+  }
+  try {
+    await loadTerrainEditorData(
+      result.terrainImageDataUrl,
+      result.terrainIndexDataUrl,
+    );
+  } catch (error) {
+    console.warn('terrain editor data load failed', error);
+    state.terrainEditable = false;
+  }
+  state.terrainEditable = Boolean(
+    state.terrainEditable &&
+    state.terrainImageData &&
+    state.terrainIndexBuf &&
+    state.terrainPalette.length === 256
+  );
+  state.heightmapEditable = Boolean(
+    state.heightmapEditable && state.heightmapImageData && state.heightmapValueBuf
+  );
+  state.riversEditable = Boolean(
+    state.riversEditable && state.riversImageData && state.riversIndexBuf
+  );
+
+  const terrainSelect = $('#terrain-palette-select');
+  terrainSelect.innerHTML = state.terrainPalette.map(entry => {
+    const name = entry.name ? ` — ${entry.name}` : '';
+    const used = entry.used ? ' •' : '';
+    return `<option value="${entry.index}">#${entry.index}${name}${used}</option>`;
+  }).join('');
+  const firstTerrain = state.terrainPalette.find(entry => entry.used) ||
+                       state.terrainPalette[0];
+  state.currentTerrainIndex = firstTerrain ? firstTerrain.index : 0;
+  terrainSelect.value = String(state.currentTerrainIndex);
+  terrainSelect.disabled = !state.terrainEditable;
+  $('#tab-terrain').disabled = !state.terrainEditable;
+  $('#tab-terrain').title = state.terrainEditable
+    ? 'terrain.bmp 편집'
+    : '8비트 인덱스 terrain.bmp가 필요합니다.';
+  updateTerrainPaletteLabel();
+
+  const heightmapTab = $('#tab-heightmap');
+  heightmapTab.disabled = !state.heightmapEditable;
+  heightmapTab.title = state.heightmapEditable
+    ? 'heightmap.bmp 편집'
+    : '같은 크기의 8비트 그레이스케일 heightmap.bmp가 필요합니다.';
+  const heightmapHint = heightmapTab.querySelector('small');
+  if (heightmapHint) {
+    heightmapHint.textContent = state.heightmapEditable
+      ? 'heightmap.bmp · 크기·강도 브러시'
+      : 'heightmap.bmp · 사용할 수 없음';
+  }
+  refreshWorldNormalAction();
+  const riversTab = $('#tab-rivers');
+  riversTab.disabled = !state.riversEditable;
+  riversTab.title = state.riversEditable
+    ? 'rivers.bmp 편집'
+    : '같은 크기의 8비트 인덱스 rivers.bmp가 필요합니다.';
+  const riversHint = riversTab.querySelector('small');
+  if (riversHint) {
+    riversHint.textContent = state.riversEditable
+      ? 'rivers.bmp · 직교 1px·규칙 검사'
+      : 'rivers.bmp · 사용할 수 없음';
+  }
+  const supplyTab = $('#tab-supply');
+  supplyTab.disabled = !state.supplyEditable;
+  supplyTab.title = state.supplyEditable
+    ? 'supply_nodes.txt와 railways.txt 편집'
+    : 'map/supply_nodes.txt와 map/railways.txt가 모두 필요합니다.';
+  const supplyHint = supplyTab.querySelector('small');
+  if (supplyHint) {
+    supplyHint.textContent = state.supplyEditable
+      ? `허브 ${state.supplyNodes.length} · 철도 ${state.railways.length}`
+      : '보급망 파일을 사용할 수 없음';
+  }
+  refreshSupplyRailList();
+  renderSupplyOverlay();
+  updateHeightmapBrushReadout();
 
   // 이미지 로드 → ImageData로
   const img = new Image();
@@ -1331,6 +3191,7 @@ async function applyLoadedMap(result) {
 
   $('#welcome').classList.add('hidden');
   state.loaded = true;
+  setMode('province');
   state.undoStack = [];
   state.redoStack = [];
   state.stateImageDirty = true;
@@ -1343,6 +3204,9 @@ async function applyLoadedMap(result) {
   if (riversBadge) riversBadge.hidden = true;
   if (fixBtn) fixBtn.hidden = true;
   refreshProtectOverlay();
+  state.provinceBordersDirty = true;
+  state.provinceBorderDirtyBounds = null;
+  refreshProvinceBorders();
   updateUndoButtons();
   updateSelectedStateLabel();
 
@@ -1410,6 +3274,7 @@ async function runAutoSplit() {
     setPixelRaw(c[0], c[1], c[5], c[6], c[7]);
   }
   flushCanvas();
+  markProvinceBordersDirty(changes);
   state.stateImageDirty = true;
 
   // Undo 등록 (브러시 포맷)
@@ -1467,6 +3332,7 @@ async function onOverlayBmpClick() {
     setPixelRaw(c[0], c[1], c[5], c[6], c[7]);
   }
   flushCanvas();
+  markProvinceBordersDirty(r.changes);
   state.stateImageDirty = true;
 
   // Undo 스택에 한 번에 등록 (브러시와 같은 [x,y,oR,oG,oB] 포맷)
@@ -1505,11 +3371,26 @@ async function onSaveClick() {
     setStatus(`저장 실패: ${preview ? preview.error : 'unknown'}`);
     return;
   }
+  if (preview.riversDirty) {
+    const validation = await runRiverTopologyValidation();
+    if (!validation || !validation.ok || !validation.valid) {
+      setStatus('강 규칙 오류를 수정한 뒤 다시 저장해주세요.');
+      return;
+    }
+  }
 
   state.newProvincesPreview = preview.newProvinces || [];
 
   // 다이얼로그 채우기
-  const summary = `새 프로빈스 ${preview.newProvinces.length}개 추가, 사라진 프로빈스 ${preview.removedProvinces.length}개. 기존 프로빈스의 스테이트 매핑은 [스테이트 할당] 탭에서 미리 지정한 내용이 사용됩니다.`;
+  const supportFiles = [];
+  if (preview.terrainDirty) supportFiles.push('terrain.bmp');
+  if (preview.heightmapDirty) supportFiles.push('heightmap.bmp');
+  if (preview.riversDirty) supportFiles.push('rivers.bmp');
+  if (preview.supplyDirty) supportFiles.push('supply_nodes.txt·railways.txt');
+  const supportSummary = supportFiles.length
+    ? ` 지원 맵 ${supportFiles.join(', ')}도 함께 저장됩니다.`
+    : '';
+  const summary = `새 프로빈스 ${preview.newProvinces.length}개 추가, 사라진 프로빈스 ${preview.removedProvinces.length}개. 기존 프로빈스의 스테이트 매핑은 [스테이트 할당] 탭에서 미리 지정한 내용이 사용됩니다.${supportSummary}`;
   $('#save-summary').textContent = summary;
   const tbody = $('#save-table tbody');
   tbody.innerHTML = '';
@@ -1563,7 +3444,11 @@ async function onSaveConfirm() {
   $('#save-dialog').classList.add('hidden');
   if (r && r.ok) {
     const extraExt = (r.modifiedExternalFiles && r.modifiedExternalFiles.length) || 0;
-    let msg = `저장 완료: 새 ${r.newProvinceCount}개 / 삭제 ${r.removedProvinceCount}개 / state ${r.modifiedStateFiles.length} / region ${r.modifiedRegionFiles.length} / 외부 파일 ${extraExt}`;
+    const terrainSaved = r.terrainSaved ? ' / terrain.bmp 저장' : '';
+    const heightmapSaved = r.heightmapSaved ? ' / heightmap.bmp 저장' : '';
+    const riversSaved = r.riversSaved ? ' / rivers.bmp 저장' : '';
+    const supplySaved = r.supplySaved ? ' / 보급망 저장' : '';
+    let msg = `저장 완료: 새 ${r.newProvinceCount}개 / 삭제 ${r.removedProvinceCount}개 / state ${r.modifiedStateFiles.length} / region ${r.modifiedRegionFiles.length} / 외부 파일 ${extraExt}${terrainSaved}${heightmapSaved}${riversSaved}${supplySaved}`;
     setStatus(msg);
     // 카운터 갱신 (백엔드가 정확한 라이브 카운트를 반환)
     if (typeof r.liveProvinceCount === 'number') {
@@ -1611,6 +3496,79 @@ function onSaveCancel() {
   setStatus('저장 취소');
 }
 
+async function runRiverTopologyValidation() {
+  if (!state.riversEditable) return null;
+  const readout = $('#river-edit-readout');
+  if (readout) readout.textContent = '검사 중…';
+  let result;
+  try {
+    result = await window.pywebview.api.validate_river_topology(200);
+  } catch (error) {
+    console.error('river topology validation failed', error);
+    setStatus('강 규칙 검사를 실행하지 못했습니다.');
+    if (readout) readout.textContent = '검사 실패';
+    return null;
+  }
+  if (!result || !result.ok) {
+    setStatus(`강 규칙 검사 실패: ${result?.error || 'unknown'}`);
+    if (readout) readout.textContent = '검사 실패';
+    return result;
+  }
+  if (result.valid) {
+    const message = `정상 · 강 ${result.componentCount}개 · 발원지 ${result.sourceCount}개`;
+    if (readout) readout.textContent = message;
+    setStatus(`강 규칙 검사 통과: ${message}`);
+    return result;
+  }
+  const issue = result.issues[0];
+  const kindLabels = {
+    source_count: '연결된 강의 발원지 수 오류',
+    cycle: '순환하는 강',
+    thick_2x2: '2×2 두께 구간',
+  };
+  const first = issue
+    ? `${kindLabels[issue.kind] || issue.kind} (${issue.x}, ${issue.y})`
+    : '알 수 없는 오류';
+  const suffix = result.truncated ? '+' : '';
+  if (readout) readout.textContent = `오류 ${result.issues.length}${suffix}건 · ${first}`;
+  setStatus(`강 규칙 위반 ${result.issues.length}${suffix}건: ${first}`);
+  return result;
+}
+
+async function generateWorldNormalNow() {
+  if (!state.heightmapEditable) {
+    setStatus('8비트 그레이스케일 heightmap.bmp가 필요합니다.');
+    return;
+  }
+  const button = $('#action-world-normal');
+  const hint = button.querySelector('small');
+  button.disabled = true;
+  if (hint) hint.textContent = '경사 계산 및 BMP 생성 중…';
+  setSupportEditorMenuOpen(false);
+  setStatus('현재 높이맵에서 world_normal.bmp 생성 중…');
+  let result;
+  try {
+    result = await window.pywebview.api.generate_world_normal();
+  } catch (error) {
+    result = { ok: false, error: String(error) };
+  }
+  if (!result || !result.ok) {
+    setStatus(`월드 노멀맵 생성 실패: ${result?.error || 'unknown'}`);
+    refreshWorldNormalAction();
+    return;
+  }
+  state.worldNormalAvailable = true;
+  state.worldNormalStale = false;
+  refreshWorldNormalAction();
+  const pendingHeightmap = result.heightmapDirty
+    ? ' · 현재 높이맵도 저장해야 두 파일이 일치합니다.'
+    : '';
+  setStatus(
+    `world_normal.bmp ${result.overwritten ? '재생성' : '생성'} 완료: ` +
+    `${result.width}×${result.height}${pendingHeightmap}`,
+  );
+}
+
 // ---------- 이벤트 등록 ----------
 window.addEventListener('pywebviewready', () => {
   $('#btn-open').addEventListener('click', onOpenClick);
@@ -1628,6 +3586,23 @@ window.addEventListener('pywebviewready', () => {
   $('#tab-province').addEventListener('click', () => setMode('province'));
   $('#tab-state').addEventListener('click', () => setMode('state'));
   $('#tab-split').addEventListener('click', () => setMode('split'));
+  $('#tab-terrain').addEventListener('click', () => setMode('terrain'));
+  $('#tab-heightmap').addEventListener('click', () => setMode('heightmap'));
+  $('#action-world-normal').addEventListener('click', generateWorldNormalNow);
+  $('#tab-rivers').addEventListener('click', () => setMode('rivers'));
+  $('#tab-supply').addEventListener('click', () => setMode('supply'));
+  $('#tab-reference').addEventListener('click', () => setMode('reference'));
+  const supportMenuButton = $('#btn-support-editors');
+  const supportMenu = $('#support-editor-menu');
+  supportMenuButton.addEventListener('click', event => {
+    event.stopPropagation();
+    setSupportEditorMenuOpen(supportMenu.hidden);
+  });
+  supportMenu.addEventListener('click', event => event.stopPropagation());
+  document.addEventListener('click', () => setSupportEditorMenuOpen(false));
+  window.addEventListener('resize', () => {
+    if (!supportMenu.hidden) setSupportEditorMenuOpen(true);
+  });
   const tabAdjEl = document.getElementById('tab-adjacency');
   if (tabAdjEl) tabAdjEl.addEventListener('click', () => setMode('adjacency'));
   $('#btn-split-run').addEventListener('click', runAutoSplit);
@@ -1638,6 +3613,47 @@ window.addEventListener('pywebviewready', () => {
       noiseReadout.textContent = `${noiseSlider.value}%`;
     });
   }
+  $('#terrain-palette-select').addEventListener('change', event => {
+    state.currentTerrainIndex = parseInt(event.target.value, 10) || 0;
+    updateTerrainPaletteLabel();
+    const entry = terrainPaletteEntry();
+    setStatus(`지형 선택: #${state.currentTerrainIndex}${entry && entry.name ? ` ${entry.name}` : ''}`);
+  });
+  for (const id of ['height-brush-size', 'height-brush-strength', 'height-brush-value']) {
+    const input = $(`#${id}`);
+    input.addEventListener('input', updateHeightmapBrushReadout);
+    input.addEventListener('change', () => {
+      const minimum = Number(input.min);
+      const maximum = Number(input.max);
+      input.value = String(Math.max(minimum, Math.min(maximum, Number(input.value) || minimum)));
+      updateHeightmapBrushReadout();
+    });
+  }
+  $('#river-palette-select').addEventListener('change', event => {
+    state.currentRiverIndex = event.target.value === 'erase'
+      ? 'erase'
+      : parseInt(event.target.value, 10);
+    const label = state.currentRiverIndex === 'erase'
+      ? '지우기'
+      : `팔레트 #${state.currentRiverIndex}`;
+    setStatus(`강 도구: ${label}`);
+  });
+  $('#btn-river-validate').addEventListener('click', runRiverTopologyValidation);
+  $('#supply-tool-select').addEventListener('change', event => {
+    const railMode = event.target.value === 'rail';
+    $('#btn-supply-rail-finish').disabled = !railMode;
+    $('#supply-edit-readout').textContent = railMode
+      ? '프로빈스를 차례로 클릭한 뒤 경로 완료'
+      : '허브를 클릭해 추가·제거';
+    if (!railMode) {
+      state.supplyRailDraft = [];
+      renderSupplyOverlay();
+    }
+  });
+  $('#btn-supply-rail-finish').addEventListener('click', finishSupplyRailway);
+  $('#btn-supply-rail-delete').addEventListener('click', deleteSelectedSupplyRailway);
+  $('#supply-rail-list').addEventListener('change', renderSupplyOverlay);
+  $('#btn-supply-rail-finish').disabled = true;
 
   // 검증 패널 버튼들
   $('#btn-check-xcross').addEventListener('click', scanXcrossingsAll);
@@ -1679,23 +3695,118 @@ window.addEventListener('pywebviewready', () => {
   const terrainReadout = $('#layer-terrain-opacity-readout');
 
   function refreshRivers() {
-    applyLayerVisibility(riversLayerCanvas,
-                         riversToggle.checked,
-                         parseInt(riversOpacity.value, 10));
+    refreshSupportEditorLayers();
     riversReadout.textContent = `${riversOpacity.value}%`;
   }
-  function refreshTerrain() {
-    applyLayerVisibility(terrainLayerCanvas,
-                         terrainToggle.checked,
-                         parseInt(terrainOpacity.value, 10));
-    terrainReadout.textContent = `${terrainOpacity.value}%`;
-  }
+  function refreshTerrain() { refreshTerrainLayerVisibility(); }
   riversToggle.addEventListener('change', refreshRivers);
   riversOpacity.addEventListener('input', refreshRivers);
   terrainToggle.addEventListener('change', refreshTerrain);
   terrainOpacity.addEventListener('input', refreshTerrain);
   refreshRivers();
   refreshTerrain();
+
+  const borderToggle = $('#layer-province-border-toggle');
+  borderToggle.addEventListener('change', () => refreshProvinceBorders(true));
+  const borderWidth = $('#layer-province-border-width');
+  const borderWidthReadout = $('#layer-province-border-width-readout');
+  borderWidth.addEventListener('input', () => {
+    const width = Math.max(0.1, Number(borderWidth.value) || 0.65);
+    borderWidthReadout.textContent = `${width.toFixed(2)}px`;
+    scheduleProvinceBorderRender();
+  });
+
+  const referenceList = $('#reference-layer-list');
+  function referenceLayerForEvent(event) {
+    const item = event.target.closest('.reference-layer-item');
+    if (!item) return null;
+    const id = parseInt(item.dataset.referenceId, 10);
+    return state.referenceLayers.find(layer => layer.id === id) || null;
+  }
+  referenceList.addEventListener('click', event => {
+    const layer = referenceLayerForEvent(event);
+    if (!layer) return;
+    if (event.target.closest('.reference-layer-remove')) {
+      deleteReferenceLayer(layer.id);
+      return;
+    }
+    const isFormControl = Boolean(event.target.closest('input, label, button'));
+    selectReferenceLayer(layer.id, !isFormControl);
+    setMode('reference');
+  });
+  referenceList.addEventListener('input', event => {
+    const layer = referenceLayerForEvent(event);
+    if (!layer) return;
+    if (event.target.classList.contains('reference-layer-scale')) {
+      const percent = Math.max(1, Math.min(2000, Number(event.target.value) || 100));
+      layer.width = Math.max(1, layer.naturalWidth * percent / 100);
+      layer.height = Math.max(1, layer.naturalHeight * percent / 100);
+      updateReferenceLayerElement(layer);
+    } else if (event.target.matches('.reference-layer-opacity input')) {
+      layer.opacity = Math.max(0, Math.min(1, Number(event.target.value) / 100));
+      const readout = event.target.parentElement.querySelector('span:last-child');
+      if (readout) readout.textContent = `${Math.round(layer.opacity * 100)}%`;
+      updateReferenceLayerElement(layer);
+    }
+  });
+  referenceList.addEventListener('change', event => {
+    const layer = referenceLayerForEvent(event);
+    if (!layer) return;
+    if (event.target.classList.contains('reference-layer-visible')) {
+      layer.visible = event.target.checked;
+      updateReferenceLayerElement(layer);
+    }
+  });
+
+  $('#btn-reference-delete').addEventListener('click', () => {
+    if (state.selectedReferenceLayerId === null) {
+      setStatus('삭제할 이미지 레이어를 먼저 선택하세요.');
+      return;
+    }
+    deleteReferenceLayer(state.selectedReferenceLayerId);
+  });
+  referenceLayerHost.addEventListener('mousedown', beginReferenceTransform);
+  referenceLayerHost.addEventListener('contextmenu', event => event.preventDefault());
+
+  const canvasArea = $('#canvas-area');
+  let dragDepth = 0;
+  canvasArea.addEventListener('dragenter', event => {
+    event.preventDefault();
+    dragDepth += 1;
+    canvasArea.classList.add('reference-drag-active');
+  });
+  canvasArea.addEventListener('dragover', event => {
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+  });
+  canvasArea.addEventListener('dragleave', event => {
+    event.preventDefault();
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (!dragDepth) canvasArea.classList.remove('reference-drag-active');
+  });
+  canvasArea.addEventListener('drop', async event => {
+    event.preventDefault();
+    dragDepth = 0;
+    canvasArea.classList.remove('reference-drag-active');
+    if (!state.loaded) {
+      setStatus('맵을 먼저 로드한 뒤 이미지를 드롭해주세요.');
+      return;
+    }
+    const files = Array.from(event.dataTransfer?.files || [])
+      .filter(file => file.type.startsWith('image/') ||
+                      /\.(png|jpe?g|bmp|gif|webp)$/i.test(file.name));
+    const [dropX, dropY] = screenToMapPoint(event.clientX, event.clientY);
+    for (let index = 0; index < files.length; index++) {
+      const file = files[index];
+      try {
+        const stagger = (18 / state.zoom) * index;
+        await addReferenceImage(file, dropX + stagger, dropY + stagger);
+      } catch (error) {
+        console.error('reference image load failed', error);
+        setStatus(`참조 이미지 로드 실패: ${file.name}`);
+      }
+    }
+  });
 
   // 레이어 패널 접기/펼치기
   const layerPanel = $('#layer-panel');
@@ -1721,6 +3832,21 @@ window.addEventListener('pywebviewready', () => {
   canvas.addEventListener('contextmenu', onContextMenu);
   $('#canvas-area').addEventListener('wheel', onWheel, { passive: false });
   window.addEventListener('keydown', onKeyDown);
+  window.addEventListener('resize', scheduleProvinceBorderRender);
+  provinceBorderCanvas.addEventListener('webglcontextlost', event => {
+    event.preventDefault();
+    provinceBorderRenderer = null;
+    state.provinceBordersDirty = true;
+    state.provinceBorderDirtyBounds = null;
+    provinceBorderCanvas.style.display = 'none';
+    setStatus('GPU 경계 렌더러가 일시 중단되었습니다.');
+  });
+  provinceBorderCanvas.addEventListener('webglcontextrestored', () => {
+    provinceBorderRenderer = null;
+    state.provinceBordersDirty = true;
+    state.provinceBorderDirtyBounds = null;
+    refreshProvinceBorders(true);
+  });
 
   updateCurrentColorLabel();
   updateUndoButtons();
