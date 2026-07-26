@@ -43,15 +43,14 @@
         </svg>
         <span>프로빈스 편집</span>
       </button>
-      <button id="tab-split" class="tab-btn" title="자동 분할 (2)">
+      <button id="btn-province-tools" class="tab-btn support-menu-trigger"
+              type="button" aria-haspopup="true" aria-expanded="false"
+              aria-controls="province-tool-menu" title="프로빈스 보조 도구">
         <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
           <path d="M12 3v18M3 12h18"/>
-          <circle cx="6" cy="6" r="2"/>
-          <circle cx="18" cy="6" r="2"/>
-          <circle cx="6" cy="18" r="2"/>
-          <circle cx="18" cy="18" r="2"/>
         </svg>
-        <span>자동 분할</span>
+        <span>프로빈스 +</span>
+        <span class="support-menu-chevron" aria-hidden="true">▾</span>
       </button>
       <span class="area-tab-group" role="group" aria-label="영역 할당 편집기">
         <button id="tab-state" class="tab-btn" title="스테이트 할당 (3)">
@@ -250,6 +249,35 @@
     <span id="status">맵을 로드해주세요</span>
   </header>
 
+  <div id="province-tool-menu" class="support-editor-menu province-tool-menu" hidden
+       role="menu" aria-label="프로빈스 보조 도구">
+    <div class="support-editor-menu-title">프로빈스 +</div>
+    <button id="tab-split" class="support-editor-item" type="button"
+            role="menuitem" title="선택한 프로빈스를 자동 분할">
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M12 3v18M3 12h18"/>
+        <circle cx="6" cy="6" r="2"/>
+        <circle cx="18" cy="6" r="2"/>
+        <circle cx="6" cy="18" r="2"/>
+        <circle cx="18" cy="18" r="2"/>
+      </svg>
+      <span class="support-editor-item-copy">
+        <strong>자동 분할</strong>
+        <small>선택한 프로빈스를 픽셀 수 기준으로 분할</small>
+      </span>
+    </button>
+    <button id="tab-province-move" class="support-editor-item" type="button"
+            role="menuitem" title="선택한 프로빈스 그룹 이동">
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M12 2v20M2 12h20M12 2l-3 3M12 2l3 3M22 12l-3-3M22 12l-3 3M12 22l-3-3M12 22l3-3M2 12l3-3M2 12l3 3"/>
+      </svg>
+      <span class="support-editor-item-copy">
+        <strong>프로빈스 이동</strong>
+        <small>복수 선택 · Shift+좌클릭 드래그로 이동</small>
+      </span>
+    </button>
+  </div>
+
   <div id="support-editor-menu" class="support-editor-menu" hidden
        role="menu" aria-label="맵 지원 편집">
     <div class="support-editor-menu-title">맵 지원 편집</div>
@@ -332,6 +360,8 @@
       <canvas id="supply-selection-canvas"></canvas>
       <svg id="supply-svg" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"></svg>
       <canvas id="protect-canvas"></canvas>
+      <canvas id="province-move-hole-canvas"></canvas>
+      <canvas id="province-move-canvas"></canvas>
       <div id="reference-layer-host"></div>
       <canvas id="overlay-canvas"></canvas>
     </div>
@@ -383,6 +413,16 @@
                  min="0.25" max="1.5" step="0.05" value="0.65"
                  title="화면 고정 선 두께 (CSS px)" />
           <span id="layer-province-border-width-readout" class="rgb-text">0.65px</span>
+        </div>
+        <div class="layer-row">
+          <label class="toggle">
+            <input type="checkbox" id="layer-state-border-toggle" />
+            <span><i class="state-border-color" aria-hidden="true"></i>핑크색 스테이트 경계</span>
+          </label>
+          <input type="range" id="layer-state-border-width"
+                 min="0.5" max="3" step="0.1" value="1.1"
+                 title="화면 고정 선 두께 (CSS px)" />
+          <span id="layer-state-border-width-readout" class="rgb-text">1.10px</span>
         </div>
         <div class="reference-layer-section">
           <div class="reference-layer-heading">
@@ -467,8 +507,9 @@
       <h1>HOI4 Province Painter</h1>
       <p>왼쪽 위 <b>"맵 폴더 열기"</b> 버튼으로 <code>provinces.bmp</code>가 들어 있는 <code>map/</code> 폴더(또는 모드 루트)를 선택하세요.</p>
       <ul>
-        <li><b>탭 버튼</b>: 프로빈스 편집 / 스테이트 할당 / 자동 분할 / 전략구역 할당 모드 전환</li>
-        <li><b>[자동 분할] 좌클릭</b>: 그 위치의 프로빈스를 선택 → '분할' 버튼으로 평균 px 기준 4가지 알고리즘 혼합 분할</li>
+        <li><b>탭 버튼</b>: 프로빈스 편집 / 프로빈스 + / 스테이트 할당 / 전략구역 할당 모드 전환</li>
+        <li><b>[프로빈스 + → 자동 분할] 좌클릭</b>: 그 위치의 프로빈스를 선택 → '분할' 버튼으로 평균 px 기준 4가지 알고리즘 혼합 분할</li>
+        <li><b>[프로빈스 + → 프로빈스 이동]</b>: 좌클릭 복수 선택 · 우클릭 해제 · Shift+좌클릭 드래그로 그룹 이동</li>
         <li><b>[프로빈스 편집] 좌클릭 드래그</b>: 1×1 픽셀 채색 (브러시)</li>
         <li><b>[프로빈스 편집] B / G</b>: 브러시 / 페인트통 도구 전환</li>
         <li><b>[스테이트 할당] 좌클릭</b>: 그 위치의 스테이트를 현재 선택으로 지정</li>
@@ -485,6 +526,7 @@
         <li><b>[ / ]</b>: 높이맵 브러시 크기를 줄이거나 늘립니다.</li>
         <li><b>참조 이미지</b>: PNG/JPG/BMP를 화면에 드래그 드롭하면 입력을 가리지 않는 레이어로 표시됩니다.</li>
         <li><b>흰색 프로빈스 테두리</b>: 오른쪽 레이어 패널에서 실제 provinces.bmp 경계를 켜고 끕니다.</li>
+        <li><b>핑크색 스테이트 경계</b>: 스테이트 사이와 해안·미할당 외곽 경계를 화면 고정 두께로 표시합니다.</li>
       </ul>
     </div>
 
@@ -565,6 +607,16 @@
         <select id="terrain-palette-select" hidden aria-hidden="true"></select>
       </div>
       <div id="terrain-palette-grid" class="terrain-palette-grid"></div>
+    </div>
+
+    <div id="province-move-bar" class="support-bottom-panel province-move-panel hidden"
+         aria-hidden="true">
+      <div class="province-move-copy">
+        <strong>프로빈스 이동</strong>
+        <span>좌클릭 복수 선택 · 우클릭 선택 해제 · Shift+좌클릭 드래그로 그룹 이동</span>
+      </div>
+      <span id="province-move-readout" class="rgb-text">선택 0개</span>
+      <button id="btn-province-move-clear" type="button">전체 선택 해제</button>
     </div>
 
     <div id="supply-editor-bar" class="support-bottom-panel supply-editor-panel hidden"

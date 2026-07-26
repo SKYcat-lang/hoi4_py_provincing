@@ -23,6 +23,8 @@ const state = {
   pixelBuf: null,          // imageData.data (Uint8ClampedArray)
   stateImageData: null,    // 스테이트 맵용 ImageData (캐시, 매핑 변경 시 갱신)
   stateImageDirty: true,   // 다음 탭 진입 시 재구성해야 하는가
+  stateBorderImageData: null,
+  stateBordersDirty: true,
   regionImageData: null,   // 전략구역 맵용 ImageData
   regionImageDirty: true,
   mode: 'province',        // 'province' | 'state' | 'region' | 'split' | ...
@@ -111,6 +113,10 @@ const state = {
   nextReferenceLayerId: 1,
   selectedReferenceLayerId: null,
   referenceTransform: null,
+  provinceMoveSelectedIds: new Set(),
+  provinceMoveSelectedPixels: new Uint32Array(0),
+  provinceMoveBounds: null,
+  provinceMoveDrag: null,
 };
 
 const canvas = $('#map-canvas');
@@ -140,6 +146,12 @@ const supplySvg = $('#supply-svg');
 const supplySelectionCanvas = $('#supply-selection-canvas');
 const supplySelectionCtx = supplySelectionCanvas.getContext('2d', { willReadFrequently: true });
 supplySelectionCtx.imageSmoothingEnabled = false;
+const provinceMoveHoleCanvas = $('#province-move-hole-canvas');
+const provinceMoveHoleCtx = provinceMoveHoleCanvas.getContext('2d');
+provinceMoveHoleCtx.imageSmoothingEnabled = false;
+const provinceMoveCanvas = $('#province-move-canvas');
+const provinceMoveCtx = provinceMoveCanvas.getContext('2d');
+provinceMoveCtx.imageSmoothingEnabled = false;
 
 const provinceBorderCanvas = $('#province-border-canvas');
 let provinceBorderRenderer = null;
@@ -1055,6 +1067,9 @@ function applyTransform() {
   supplySvg.style.transform = t;
   supplySelectionCanvas.style.transformOrigin = '0 0';
   supplySelectionCanvas.style.transform = t;
+  provinceMoveHoleCanvas.style.transformOrigin = '0 0';
+  provinceMoveHoleCanvas.style.transform = t;
+  applyProvinceMoveCanvasTransform();
   supplySvg.querySelectorAll('.supply-hub').forEach(circle => {
     circle.setAttribute('r', String(6 / state.zoom));
   });
@@ -1111,6 +1126,8 @@ function setPixelRaw(x, y, r, g, b) {
   buf[i + 3] = 255;
   state.stateImageDirty = true;
   state.regionImageDirty = true;
+  state.stateBordersDirty = true;
+  state.stateBorderImageData = null;
 }
 
 function getTerrainIndex(x, y) {
@@ -1462,13 +1479,18 @@ function initProvinceBorderRenderer() {
     precision highp int;
     uniform sampler2D u_provinces;
     uniform ivec2 u_map_size;
+    uniform bool u_state_layer;
     out vec4 out_color;
 
     bool differs(ivec2 a, ivec2 b) {
-      return any(notEqual(
-        texelFetch(u_provinces, a, 0).rgb,
-        texelFetch(u_provinces, b, 0).rgb
-      ));
+      vec3 first = texelFetch(u_provinces, a, 0).rgb;
+      vec3 second = texelFetch(u_provinces, b, 0).rgb;
+      if (u_state_layer) {
+        bool either_assigned = any(greaterThan(first, vec3(0.0))) ||
+                               any(greaterThan(second, vec3(0.0)));
+        return either_assigned && any(notEqual(first, second));
+      }
+      return any(notEqual(first, second));
     }
 
     void main() {
@@ -1488,12 +1510,17 @@ function initProvinceBorderRenderer() {
     precision highp int;
     uniform sampler2D u_provinces;
     uniform sampler2D u_border_mask;
+    uniform sampler2D u_states;
+    uniform sampler2D u_state_border_mask;
     uniform ivec2 u_map_size;
     uniform vec2 u_pan;
     uniform float u_zoom;
     uniform float u_device_scale;
     uniform float u_framebuffer_height;
     uniform float u_line_width;
+    uniform float u_state_line_width;
+    uniform bool u_show_province;
+    uniform bool u_show_state;
     out vec4 out_color;
 
     bool differs(ivec2 a, ivec2 b) {
@@ -1501,6 +1528,71 @@ function initProvinceBorderRenderer() {
         texelFetch(u_provinces, a, 0).rgb,
         texelFetch(u_provinces, b, 0).rgb
       ));
+    }
+
+    bool differsState(ivec2 a, ivec2 b) {
+      vec3 first = texelFetch(u_states, a, 0).rgb;
+      vec3 second = texelFetch(u_states, b, 0).rgb;
+      bool either_assigned = any(greaterThan(first, vec3(0.0))) ||
+                             any(greaterThan(second, vec3(0.0)));
+      return either_assigned && any(notEqual(first, second));
+    }
+
+    float layerAlpha(
+      vec2 map_point,
+      float physical_zoom,
+      float lod,
+      float line_width,
+      bool state_layer
+    ) {
+      vec2 uv = (map_point + vec2(0.5)) / vec2(u_map_size);
+      float mask_coverage = state_layer
+        ? textureLod(u_state_border_mask, uv, lod).r
+        : textureLod(u_border_mask, uv, lod).r;
+      float mip_alpha = clamp(
+        mask_coverage * line_width / max(u_zoom, 0.02),
+        0.0,
+        1.0
+      );
+      float alpha = mip_alpha;
+      if (physical_zoom > 0.75) {
+        ivec2 cell = ivec2(floor(map_point));
+        vec2 inside = fract(map_point);
+        float distance_px = 1.0e20;
+        if (cell.x > 0 && (state_layer
+            ? differsState(cell, cell + ivec2(-1, 0))
+            : differs(cell, cell + ivec2(-1, 0)))) {
+          distance_px = min(distance_px, inside.x * u_zoom);
+        }
+        if (cell.x + 1 < u_map_size.x && (state_layer
+            ? differsState(cell, cell + ivec2(1, 0))
+            : differs(cell, cell + ivec2(1, 0)))) {
+          distance_px = min(distance_px, (1.0 - inside.x) * u_zoom);
+        }
+        if (cell.y > 0 && (state_layer
+            ? differsState(cell, cell + ivec2(0, -1))
+            : differs(cell, cell + ivec2(0, -1)))) {
+          distance_px = min(distance_px, inside.y * u_zoom);
+        }
+        if (cell.y + 1 < u_map_size.y && (state_layer
+            ? differsState(cell, cell + ivec2(0, 1))
+            : differs(cell, cell + ivec2(0, 1)))) {
+          distance_px = min(distance_px, (1.0 - inside.y) * u_zoom);
+        }
+        float feather = max(0.5 / u_device_scale, 0.12);
+        float half_width = line_width * 0.5;
+        float exact_alpha = clamp(
+          (half_width + feather - distance_px) / (2.0 * feather),
+          0.0,
+          1.0
+        );
+        alpha = mix(
+          mip_alpha,
+          exact_alpha,
+          smoothstep(0.75, 1.25, physical_zoom)
+        );
+      }
+      return alpha;
     }
 
     void main() {
@@ -1515,49 +1607,20 @@ function initProvinceBorderRenderer() {
         discard;
       }
 
-      vec2 uv = (map_point + vec2(0.5)) / map_size;
       float physical_zoom = u_zoom * u_device_scale;
       float lod = max(0.0, log2(1.0 / max(physical_zoom, 0.0001)));
-      float mask_coverage = textureLod(u_border_mask, uv, lod).r;
-      float mip_alpha = clamp(
-        mask_coverage * u_line_width / max(u_zoom, 0.02),
-        0.0,
-        1.0
-      );
-      float alpha = mip_alpha;
-      if (physical_zoom > 0.75) {
-        ivec2 cell = ivec2(floor(map_point));
-        vec2 inside = fract(map_point);
-        float distance_px = 1.0e20;
-        if (cell.x > 0 && differs(cell, cell + ivec2(-1, 0))) {
-          distance_px = min(distance_px, inside.x * u_zoom);
-        }
-        if (cell.x + 1 < u_map_size.x &&
-            differs(cell, cell + ivec2(1, 0))) {
-          distance_px = min(distance_px, (1.0 - inside.x) * u_zoom);
-        }
-        if (cell.y > 0 && differs(cell, cell + ivec2(0, -1))) {
-          distance_px = min(distance_px, inside.y * u_zoom);
-        }
-        if (cell.y + 1 < u_map_size.y &&
-            differs(cell, cell + ivec2(0, 1))) {
-          distance_px = min(distance_px, (1.0 - inside.y) * u_zoom);
-        }
-        float feather = max(0.5 / u_device_scale, 0.12);
-        float half_width = u_line_width * 0.5;
-        float exact_alpha = clamp(
-          (half_width + feather - distance_px) / (2.0 * feather),
-          0.0,
-          1.0
-        );
-        alpha = mix(
-          mip_alpha,
-          exact_alpha,
-          smoothstep(0.75, 1.25, physical_zoom)
-        );
-      }
+      float province_alpha = u_show_province
+        ? layerAlpha(map_point, physical_zoom, lod, u_line_width, false)
+        : 0.0;
+      float state_alpha = u_show_state
+        ? layerAlpha(map_point, physical_zoom, lod, u_state_line_width, true)
+        : 0.0;
+      float alpha = max(province_alpha, state_alpha);
       if (alpha <= 0.001) discard;
-      out_color = vec4(vec3(alpha), alpha);
+      vec3 pink = vec3(1.0, 0.31, 0.64);
+      float pink_mix = state_alpha > 0.001 ? 1.0 : 0.0;
+      vec3 color = mix(vec3(1.0), pink, pink_mix);
+      out_color = vec4(color * alpha, alpha);
     }
   `;
 
@@ -1570,10 +1633,14 @@ function initProvinceBorderRenderer() {
       provinceTexture: gl.createTexture(),
       maskTexture: gl.createTexture(),
       maskFramebuffer: gl.createFramebuffer(),
+      stateTexture: gl.createTexture(),
+      stateMaskTexture: gl.createTexture(),
+      stateMaskFramebuffer: gl.createFramebuffer(),
       vertexArray: gl.createVertexArray(),
       width: 0,
       height: 0,
       textureReady: false,
+      stateTextureReady: false,
     };
   } catch (error) {
     console.error('province border WebGL initialization failed', error);
@@ -1588,6 +1655,7 @@ function ensureProvinceBorderTextures(renderer) {
   renderer.width = state.width;
   renderer.height = state.height;
   renderer.textureReady = false;
+  renderer.stateTextureReady = false;
 
   gl.bindTexture(gl.TEXTURE_2D, renderer.provinceTexture);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
@@ -1616,6 +1684,35 @@ function ensureProvinceBorderTextures(renderer) {
   );
   if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
     throw new Error('프로빈스 경계 마스크 framebuffer를 만들 수 없습니다.');
+  }
+
+  gl.bindTexture(gl.TEXTURE_2D, renderer.stateTexture);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texImage2D(
+    gl.TEXTURE_2D, 0, gl.RGBA8, state.width, state.height, 0,
+    gl.RGBA, gl.UNSIGNED_BYTE, null,
+  );
+
+  gl.bindTexture(gl.TEXTURE_2D, renderer.stateMaskTexture);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texImage2D(
+    gl.TEXTURE_2D, 0, gl.R8, state.width, state.height, 0,
+    gl.RED, gl.UNSIGNED_BYTE, null,
+  );
+
+  gl.bindFramebuffer(gl.FRAMEBUFFER, renderer.stateMaskFramebuffer);
+  gl.framebufferTexture2D(
+    gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0,
+    gl.TEXTURE_2D, renderer.stateMaskTexture, 0,
+  );
+  if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+    throw new Error('스테이트 경계 마스크 framebuffer를 만들 수 없습니다.');
   }
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 }
@@ -1665,9 +1762,31 @@ function uploadProvinceBorderPixels(renderer, bounds) {
   return area;
 }
 
-function rebuildProvinceBorderMask(renderer, area) {
+function uploadStateBorderPixels(renderer) {
   const { gl } = renderer;
-  gl.bindFramebuffer(gl.FRAMEBUFFER, renderer.maskFramebuffer);
+  ensureProvinceBorderTextures(renderer);
+  state.stateBorderImageData = buildAreaImageData(
+    state.assignments, state.stateById, null,
+  );
+  gl.bindTexture(gl.TEXTURE_2D, renderer.stateTexture);
+  gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+  gl.texSubImage2D(
+    gl.TEXTURE_2D, 0, 0, 0, state.width, state.height,
+    gl.RGBA, gl.UNSIGNED_BYTE, state.stateBorderImageData.data,
+  );
+  renderer.stateTextureReady = true;
+}
+
+function rebuildProvinceBorderMask(
+  renderer,
+  area,
+  sourceTexture = renderer.provinceTexture,
+  maskTexture = renderer.maskTexture,
+  maskFramebuffer = renderer.maskFramebuffer,
+  stateLayer = false,
+) {
+  const { gl } = renderer;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, maskFramebuffer);
   gl.viewport(0, 0, state.width, state.height);
   gl.disable(gl.BLEND);
   if (area) {
@@ -1679,8 +1798,12 @@ function rebuildProvinceBorderMask(renderer, area) {
   gl.useProgram(renderer.maskProgram);
   gl.bindVertexArray(renderer.vertexArray);
   gl.activeTexture(gl.TEXTURE0);
-  gl.bindTexture(gl.TEXTURE_2D, renderer.provinceTexture);
+  gl.bindTexture(gl.TEXTURE_2D, sourceTexture);
   gl.uniform1i(gl.getUniformLocation(renderer.maskProgram, 'u_provinces'), 0);
+  gl.uniform1i(
+    gl.getUniformLocation(renderer.maskProgram, 'u_state_layer'),
+    stateLayer ? 1 : 0,
+  );
   gl.uniform2i(
     gl.getUniformLocation(renderer.maskProgram, 'u_map_size'),
     state.width,
@@ -1690,7 +1813,7 @@ function rebuildProvinceBorderMask(renderer, area) {
   gl.disable(gl.SCISSOR_TEST);
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 
-  gl.bindTexture(gl.TEXTURE_2D, renderer.maskTexture);
+  gl.bindTexture(gl.TEXTURE_2D, maskTexture);
   gl.generateMipmap(gl.TEXTURE_2D);
 }
 
@@ -1721,6 +1844,14 @@ function renderProvinceBorders(renderer) {
   gl.activeTexture(gl.TEXTURE1);
   gl.bindTexture(gl.TEXTURE_2D, renderer.maskTexture);
   gl.uniform1i(gl.getUniformLocation(renderer.screenProgram, 'u_border_mask'), 1);
+  gl.activeTexture(gl.TEXTURE2);
+  gl.bindTexture(gl.TEXTURE_2D, renderer.stateTexture);
+  gl.uniform1i(gl.getUniformLocation(renderer.screenProgram, 'u_states'), 2);
+  gl.activeTexture(gl.TEXTURE3);
+  gl.bindTexture(gl.TEXTURE_2D, renderer.stateMaskTexture);
+  gl.uniform1i(
+    gl.getUniformLocation(renderer.screenProgram, 'u_state_border_mask'), 3,
+  );
   gl.uniform2i(
     gl.getUniformLocation(renderer.screenProgram, 'u_map_size'),
     state.width,
@@ -1748,6 +1879,20 @@ function renderProvinceBorders(renderer) {
   gl.uniform1f(
     gl.getUniformLocation(renderer.screenProgram, 'u_line_width'),
     lineWidth,
+  );
+  const stateWidthInput = $('#layer-state-border-width');
+  const stateLineWidth = Math.max(0.1, Number(stateWidthInput?.value) || 1.1);
+  gl.uniform1f(
+    gl.getUniformLocation(renderer.screenProgram, 'u_state_line_width'),
+    stateLineWidth,
+  );
+  gl.uniform1i(
+    gl.getUniformLocation(renderer.screenProgram, 'u_show_province'),
+    $('#layer-province-border-toggle')?.checked ? 1 : 0,
+  );
+  gl.uniform1i(
+    gl.getUniformLocation(renderer.screenProgram, 'u_show_state'),
+    $('#layer-state-border-toggle')?.checked ? 1 : 0,
   );
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 }
@@ -1782,8 +1927,9 @@ function addProvinceBorderDirtyBounds(points) {
 }
 
 function scheduleProvinceBorderRender() {
-  const toggle = $('#layer-province-border-toggle');
-  if (!state.loaded || !toggle?.checked || provinceBorderFrame) return;
+  const provinceEnabled = $('#layer-province-border-toggle')?.checked;
+  const stateEnabled = $('#layer-state-border-toggle')?.checked;
+  if (!state.loaded || (!provinceEnabled && !stateEnabled) || provinceBorderFrame) return;
   provinceBorderFrame = window.requestAnimationFrame(() => {
     provinceBorderFrame = 0;
     refreshProvinceBorders();
@@ -1798,25 +1944,37 @@ function markProvinceBordersDirty(points = null) {
   } else {
     addProvinceBorderDirtyBounds(points);
   }
+  state.stateBordersDirty = true;
+  state.stateBorderImageData = null;
+  scheduleProvinceBorderRender();
+}
+
+function markStateBordersDirty() {
+  state.stateBordersDirty = true;
+  state.stateBorderImageData = null;
   scheduleProvinceBorderRender();
 }
 
 function refreshProvinceBorders(force = false) {
   const toggle = $('#layer-province-border-toggle');
-  const enabled = Boolean(toggle && toggle.checked && state.loaded);
+  const stateToggle = $('#layer-state-border-toggle');
+  const provinceEnabled = Boolean(toggle?.checked && state.loaded);
+  const stateEnabled = Boolean(stateToggle?.checked && state.loaded);
+  const enabled = provinceEnabled || stateEnabled;
   provinceBorderCanvas.style.display = enabled ? 'block' : 'none';
   if (!enabled || !state.imageData) return;
 
   const renderer = initProvinceBorderRenderer();
   if (!renderer.available) {
-    toggle.checked = false;
+    if (toggle) toggle.checked = false;
+    if (stateToggle) stateToggle.checked = false;
     provinceBorderCanvas.style.display = 'none';
-    setStatus(`GPU 프로빈스 테두리 사용 불가: ${renderer.error}`);
+    setStatus(`GPU 경계 렌더러 사용 불가: ${renderer.error}`);
     return;
   }
 
   try {
-    if (state.provinceBordersDirty || !renderer.textureReady) {
+    if (provinceEnabled && (state.provinceBordersDirty || !renderer.textureReady)) {
       const area = uploadProvinceBorderPixels(
         renderer,
         state.provinceBorderDirtyBounds,
@@ -1825,12 +1983,27 @@ function refreshProvinceBorders(force = false) {
       state.provinceBordersDirty = false;
       state.provinceBorderDirtyBounds = null;
     }
-    if (force || renderer.textureReady) renderProvinceBorders(renderer);
+    if (stateEnabled && (state.stateBordersDirty || !renderer.stateTextureReady)) {
+      uploadStateBorderPixels(renderer);
+      rebuildProvinceBorderMask(
+        renderer,
+        null,
+        renderer.stateTexture,
+        renderer.stateMaskTexture,
+        renderer.stateMaskFramebuffer,
+        true,
+      );
+      state.stateBordersDirty = false;
+    }
+    if (force || renderer.textureReady || renderer.stateTextureReady) {
+      renderProvinceBorders(renderer);
+    }
   } catch (error) {
     console.error('province border render failed', error);
-    toggle.checked = false;
+    if (toggle) toggle.checked = false;
+    if (stateToggle) stateToggle.checked = false;
     provinceBorderCanvas.style.display = 'none';
-    setStatus(`GPU 프로빈스 테두리 렌더링 실패: ${error}`);
+    setStatus(`GPU 경계 렌더링 실패: ${error}`);
   }
 }
 
@@ -2144,9 +2317,158 @@ function setSupportEditorMenuOpen(open) {
   trigger.setAttribute('aria-expanded', open ? 'true' : 'false');
 }
 
+function setProvinceToolMenuOpen(open) {
+  const trigger = $('#btn-province-tools');
+  const menu = $('#province-tool-menu');
+  if (!trigger || !menu) return;
+  if (open) {
+    menu.hidden = false;
+    const rect = trigger.getBoundingClientRect();
+    const left = Math.min(
+      Math.max(8, rect.left),
+      Math.max(8, window.innerWidth - menu.offsetWidth - 8),
+    );
+    menu.style.left = `${left}px`;
+    menu.style.top = `${rect.bottom + 5}px`;
+  } else {
+    menu.hidden = true;
+  }
+  trigger.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
+function applyProvinceMoveCanvasTransform() {
+  if (!provinceMoveCanvas) return;
+  const drag = state.provinceMoveDrag;
+  const dx = drag ? drag.dx : 0;
+  const dy = drag ? drag.dy : 0;
+  provinceMoveCanvas.style.transformOrigin = '0 0';
+  provinceMoveCanvas.style.transform =
+    `translate(${state.panX + dx * state.zoom}px, ${state.panY + dy * state.zoom}px) scale(${state.zoom})`;
+}
+
+function updateProvinceMoveReadout() {
+  const readout = $('#province-move-readout');
+  if (!readout) return;
+  const pixels = state.provinceMoveSelectedPixels.length;
+  readout.textContent = `선택 ${state.provinceMoveSelectedIds.size}개 · ${pixels.toLocaleString()}픽셀`;
+}
+
+function selectedProvincePackedColors() {
+  const colors = new Set();
+  for (const provinceId of state.provinceMoveSelectedIds) {
+    const rgb = state.provinceRgbById.get(provinceId);
+    if (rgb) colors.add((rgb[0] << 16) | (rgb[1] << 8) | rgb[2]);
+  }
+  return colors;
+}
+
+function clearProvinceMoveCanvases() {
+  provinceMoveCtx.clearRect(0, 0, provinceMoveCanvas.width, provinceMoveCanvas.height);
+  provinceMoveHoleCtx.clearRect(
+    0, 0, provinceMoveHoleCanvas.width, provinceMoveHoleCanvas.height,
+  );
+}
+
+function renderProvinceMoveSelection() {
+  clearProvinceMoveCanvases();
+  state.provinceMoveDrag = null;
+  applyProvinceMoveCanvasTransform();
+  const colors = selectedProvincePackedColors();
+  if (!state.loaded || colors.size === 0) {
+    state.provinceMoveSelectedPixels = new Uint32Array(0);
+    state.provinceMoveBounds = null;
+    updateProvinceMoveReadout();
+    return;
+  }
+
+  let count = 0;
+  let minX = state.width;
+  let minY = state.height;
+  let maxX = -1;
+  let maxY = -1;
+  for (let pixel = 0, offset = 0; pixel < state.width * state.height; pixel++, offset += 4) {
+    const packed = (
+      (state.pixelBuf[offset] << 16) |
+      (state.pixelBuf[offset + 1] << 8) |
+      state.pixelBuf[offset + 2]
+    );
+    if (!colors.has(packed)) continue;
+    const x = pixel % state.width;
+    const y = Math.floor(pixel / state.width);
+    count++;
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  }
+
+  if (!count) {
+    state.provinceMoveSelectedPixels = new Uint32Array(0);
+    state.provinceMoveBounds = null;
+    updateProvinceMoveReadout();
+    return;
+  }
+
+  const selectedPixels = new Uint32Array(count);
+  const cropWidth = maxX - minX + 1;
+  const cropHeight = maxY - minY + 1;
+  const highlight = provinceMoveCtx.createImageData(cropWidth, cropHeight);
+  let selectedIndex = 0;
+  for (let pixel = 0, offset = 0; pixel < state.width * state.height; pixel++, offset += 4) {
+    const packed = (
+      (state.pixelBuf[offset] << 16) |
+      (state.pixelBuf[offset + 1] << 8) |
+      state.pixelBuf[offset + 2]
+    );
+    if (!colors.has(packed)) continue;
+    selectedPixels[selectedIndex++] = pixel;
+    const x = pixel % state.width;
+    const y = Math.floor(pixel / state.width);
+    const cropOffset = ((y - minY) * cropWidth + x - minX) * 4;
+    highlight.data[cropOffset] = 255;
+    highlight.data[cropOffset + 1] = 202;
+    highlight.data[cropOffset + 2] = 40;
+    highlight.data[cropOffset + 3] = 150;
+  }
+  state.provinceMoveSelectedPixels = selectedPixels;
+  state.provinceMoveBounds = { minX, minY, maxX, maxY };
+  provinceMoveCtx.putImageData(highlight, minX, minY);
+  updateProvinceMoveReadout();
+}
+
+function renderProvinceMoveDragPreview() {
+  const bounds = state.provinceMoveBounds;
+  if (!bounds || !state.provinceMoveSelectedPixels.length) return;
+  clearProvinceMoveCanvases();
+  const cropWidth = bounds.maxX - bounds.minX + 1;
+  const cropHeight = bounds.maxY - bounds.minY + 1;
+  const moved = provinceMoveCtx.createImageData(cropWidth, cropHeight);
+  const holes = provinceMoveHoleCtx.createImageData(cropWidth, cropHeight);
+  for (const pixel of state.provinceMoveSelectedPixels) {
+    const x = pixel % state.width;
+    const y = Math.floor(pixel / state.width);
+    const sourceOffset = pixel * 4;
+    const cropOffset = ((y - bounds.minY) * cropWidth + x - bounds.minX) * 4;
+    moved.data[cropOffset] = state.pixelBuf[sourceOffset];
+    moved.data[cropOffset + 1] = state.pixelBuf[sourceOffset + 1];
+    moved.data[cropOffset + 2] = state.pixelBuf[sourceOffset + 2];
+    moved.data[cropOffset + 3] = 255;
+    holes.data[cropOffset + 3] = 255;
+  }
+  provinceMoveCtx.putImageData(moved, bounds.minX, bounds.minY);
+  provinceMoveHoleCtx.putImageData(holes, bounds.minX, bounds.minY);
+  applyProvinceMoveCanvasTransform();
+}
+
+function clearProvinceMoveSelection() {
+  state.provinceMoveSelectedIds.clear();
+  renderProvinceMoveSelection();
+  setStatus('프로빈스 이동: 선택을 모두 해제했습니다.');
+}
+
 // ---------- 탭/모드 전환 ----------
 function setMode(name) {
-  if (!['province', 'state', 'region', 'split', 'adjacency', 'terrain', 'heightmap', 'rivers', 'supply', 'reference'].includes(name)) return;
+  if (!['province', 'move', 'state', 'region', 'split', 'adjacency', 'terrain', 'heightmap', 'rivers', 'supply', 'reference'].includes(name)) return;
   if (name === 'terrain' && !state.terrainEditable) {
     setStatus('8비트 인덱스 terrain.bmp를 로드해야 지형 편집을 사용할 수 있습니다.');
     return;
@@ -2170,6 +2492,8 @@ function setMode(name) {
   $('#tab-state').classList.toggle('active', name === 'state');
   $('#tab-region').classList.toggle('active', name === 'region');
   $('#tab-split').classList.toggle('active', name === 'split');
+  $('#tab-province-move').classList.toggle('active', name === 'move');
+  $('#btn-province-tools').classList.toggle('active', ['split', 'move'].includes(name));
   $('#tab-terrain').classList.toggle('active', name === 'terrain');
   $('#tab-heightmap').classList.toggle('active', name === 'heightmap');
   $('#tab-rivers').classList.toggle('active', name === 'rivers');
@@ -2179,6 +2503,7 @@ function setMode(name) {
     'active', ['adjacency', 'terrain', 'heightmap', 'rivers', 'supply'].includes(name),
   );
   setSupportEditorMenuOpen(false);
+  setProvinceToolMenuOpen(false);
   const tabAdj = $('#tab-adjacency');
   if (tabAdj) tabAdj.classList.toggle('active', name === 'adjacency');
 
@@ -2220,6 +2545,7 @@ function setMode(name) {
   const adjListPanel = document.getElementById('adjacency-list-panel');
   const terrainPaletteBar = document.getElementById('terrain-palette-bar');
   const supplyEditorBar = document.getElementById('supply-editor-bar');
+  const provinceMoveBar = document.getElementById('province-move-bar');
   if (adjBar) {
     adjBar.classList.toggle('hidden', name !== 'adjacency');
     adjBar.setAttribute('aria-hidden', name !== 'adjacency' ? 'true' : 'false');
@@ -2234,6 +2560,10 @@ function setMode(name) {
   if (supplyEditorBar) {
     supplyEditorBar.classList.toggle('hidden', name !== 'supply');
     supplyEditorBar.setAttribute('aria-hidden', name !== 'supply' ? 'true' : 'false');
+  }
+  if (provinceMoveBar) {
+    provinceMoveBar.classList.toggle('hidden', name !== 'move');
+    provinceMoveBar.setAttribute('aria-hidden', name !== 'move' ? 'true' : 'false');
   }
   // 인접 모드 진입 시 영구 선/목록 자동 로드
   if (name === 'adjacency' && window.AdjMode && typeof window.AdjMode.enter === 'function') {
@@ -2255,6 +2585,10 @@ function setMode(name) {
       ctx.putImageData(state.regionImageData, 0, 0);
       canvas.style.cursor = 'pointer';
       updateSelectedRegionLabel();
+    } else if (name === 'move') {
+      ctx.putImageData(state.imageData, 0, 0);
+      canvas.style.cursor = 'pointer';
+      renderProvinceMoveSelection();
     } else if (name === 'split') {
       // 분할 모드는 프로빈스 BMP를 그대로 보여줌 (편집은 브러시 안 함)
       ctx.putImageData(state.imageData, 0, 0);
@@ -2293,9 +2627,17 @@ function setMode(name) {
   for (const layer of state.referenceLayers) updateReferenceLayerElement(layer);
   refreshTerrainLayerVisibility();
   refreshSupportEditorLayers();
-  protectCanvas.style.display = ['terrain', 'rivers', 'supply'].includes(name) ? 'none' : 'block';
+  const moveVisible = name === 'move';
+  provinceMoveCanvas.style.opacity = moveVisible ? '1' : '0';
+  provinceMoveHoleCanvas.style.opacity = moveVisible ? '1' : '0';
+  if (!moveVisible) {
+    state.provinceMoveDrag = null;
+    applyProvinceMoveCanvasTransform();
+  }
+  protectCanvas.style.display = ['move', 'terrain', 'rivers', 'supply'].includes(name) ? 'none' : 'block';
   const labels = {
     province: '프로빈스 편집',
+    move: '프로빈스 이동',
     state: '스테이트 할당',
     region: '전략구역 할당',
     split: '자동 분할',
@@ -2896,6 +3238,7 @@ async function handleStateModeClick(x, y, shiftKey) {
     return;
   }
   state.assignments.set(pid, state.selectedStateId);
+  markStateBordersDirty();
   setStatus(`프로빈스 ${pid} → 스테이트 ${state.selectedStateId} 편입${res.previousStateId !== null && res.previousStateId !== undefined ? ` (이전: ${res.previousStateId})` : ''}`);
   updateSelectedStateLabel();
   refreshStateImageIfActive();
@@ -2986,6 +3329,7 @@ async function unassignAreaAtPixel(x, y, areaKind) {
       return;
     }
     state.assignments.delete(provinceId);
+    markStateBordersDirty();
     updateSelectedStateLabel();
     refreshStateImageIfActive();
     setStatus(`프로빈스 ${provinceId}: 스테이트 ${result.stateId} 할당 해제`);
@@ -3192,6 +3536,114 @@ async function performRiversProvinceFill(x, y) {
 }
 
 // ---------- 입력 처리 ----------
+function selectProvinceForMove(x, y) {
+  if (x < 0 || y < 0 || x >= state.width || y >= state.height) return;
+  const provinceId = provinceIdAtPixel(x, y);
+  if (provinceId === null) {
+    setStatus('프로빈스 이동: definition.csv에 등록된 프로빈스만 선택할 수 있습니다.');
+    return;
+  }
+  state.provinceMoveSelectedIds.add(provinceId);
+  renderProvinceMoveSelection();
+  setStatus(`프로빈스 ${provinceId} 선택 · 현재 ${state.provinceMoveSelectedIds.size}개`);
+}
+
+function deselectProvinceForMove(x, y) {
+  if (x < 0 || y < 0 || x >= state.width || y >= state.height) return;
+  const provinceId = provinceIdAtPixel(x, y);
+  if (provinceId === null || !state.provinceMoveSelectedIds.has(provinceId)) {
+    setStatus('프로빈스 이동: 이 위치에는 선택된 프로빈스가 없습니다.');
+    return;
+  }
+  state.provinceMoveSelectedIds.delete(provinceId);
+  renderProvinceMoveSelection();
+  setStatus(`프로빈스 ${provinceId} 선택 해제 · 현재 ${state.provinceMoveSelectedIds.size}개`);
+}
+
+function beginProvinceMoveDrag(x, y) {
+  const provinceId = provinceIdAtPixel(x, y);
+  if (provinceId === null || !state.provinceMoveSelectedIds.has(provinceId)) {
+    setStatus('Shift+좌클릭 드래그는 선택된 프로빈스 위에서 시작하세요.');
+    return;
+  }
+  if (!state.provinceMoveBounds || !state.provinceMoveSelectedPixels.length) return;
+  state.provinceMoveDrag = { startX: x, startY: y, dx: 0, dy: 0 };
+  renderProvinceMoveDragPreview();
+  canvas.style.cursor = 'grabbing';
+}
+
+function updateProvinceMoveDrag(x, y) {
+  const drag = state.provinceMoveDrag;
+  const bounds = state.provinceMoveBounds;
+  if (!drag || !bounds) return;
+  drag.dx = Math.max(
+    -bounds.minX,
+    Math.min(state.width - 1 - bounds.maxX, x - drag.startX),
+  );
+  drag.dy = Math.max(
+    -bounds.minY,
+    Math.min(state.height - 1 - bounds.maxY, y - drag.startY),
+  );
+  applyProvinceMoveCanvasTransform();
+  $('#province-move-readout').textContent =
+    `선택 ${state.provinceMoveSelectedIds.size}개 · 이동 (${drag.dx}, ${drag.dy})`;
+}
+
+async function finishProvinceMoveDrag() {
+  const drag = state.provinceMoveDrag;
+  state.provinceMoveDrag = null;
+  canvas.style.cursor = 'pointer';
+  applyProvinceMoveCanvasTransform();
+  if (!drag || (!drag.dx && !drag.dy)) {
+    renderProvinceMoveSelection();
+    return;
+  }
+
+  state.historyBusy = true;
+  updateUndoButtons();
+  let result;
+  try {
+    result = await window.pywebview.api.move_provinces(
+      Array.from(state.provinceMoveSelectedIds), drag.dx, drag.dy,
+    );
+  } catch (error) {
+    result = { ok: false, error: String(error) };
+  }
+  if (!result || !result.ok) {
+    renderProvinceMoveSelection();
+    setStatus(`프로빈스 이동 실패: ${result?.error || 'unknown'}`);
+    state.historyBusy = false;
+    updateUndoButtons();
+    return;
+  }
+
+  const changes = result.changedPixels || [];
+  for (const change of changes) {
+    setPixelRaw(change[0], change[1], change[5], change[6], change[7]);
+  }
+  if (changes.length) {
+    state.undoStack.push({
+      kind: 'province_move',
+      changes: changes.map(change => change.slice(0, 5)),
+    });
+    state.redoStack = [];
+    state.stateImageDirty = true;
+    state.regionImageDirty = true;
+    state.protectOverlayDirty = true;
+    state.supplyCentroids = null;
+    state.supplySelectionKey = '';
+    flushCanvas();
+    markProvinceBordersDirty(changes);
+  }
+  renderProvinceMoveSelection();
+  state.historyBusy = false;
+  updateUndoButtons();
+  setStatus(
+    `프로빈스 ${state.provinceMoveSelectedIds.size}개 이동 완료 · ` +
+    `(${drag.dx}, ${drag.dy}) · ${changes.length.toLocaleString()}픽셀 변경`,
+  );
+}
+
 function onMouseDown(e) {
   if (!state.loaded) return;
   const [x, y] = screenToPixel(e.clientX, e.clientY);
@@ -3220,6 +3672,11 @@ function onMouseDown(e) {
     }
     if (state.mode === 'region') {
       handleStrategicRegionModeClick(x, y, e.shiftKey);
+      return;
+    }
+    if (state.mode === 'move') {
+      if (e.shiftKey) beginProvinceMoveDrag(x, y);
+      else selectProvinceForMove(x, y);
       return;
     }
     // 자동 분할 모드: 클릭한 픽셀 좌표만 기록 (실제 분할은 [분할] 버튼)
@@ -3366,11 +3823,21 @@ function onMouseMove(e) {
 
   // 커서 정보 + Delete 키 동작용 좌표 추적
   const [px, py] = screenToPixel(e.clientX, e.clientY);
+  if (state.provinceMoveDrag) {
+    updateProvinceMoveDrag(px, py);
+    return;
+  }
   state.lastCursorXY = [px, py];
   updateSupportBrushPreview(e.clientX, e.clientY);
   if (px >= 0 && py >= 0 && px < state.width && py < state.height) {
     const [r, g, b] = getPixel(px, py);
-    if (state.mode === 'state' || state.mode === 'region') {
+    if (state.mode === 'move') {
+      const provinceId = provinceIdAtPixel(px, py);
+      $('#cursor-info').textContent = provinceId === null
+        ? `(${px}, ${py})  invalid (0,0,0)`
+        : `(${px}, ${py})  프로빈스 ${provinceId}` +
+          (state.provinceMoveSelectedIds.has(provinceId) ? ' · 선택됨' : '');
+    } else if (state.mode === 'state' || state.mode === 'region') {
       const provinceId = state.rgbToProvinceId.get(`${r},${g},${b}`);
       const areaId = provinceId === undefined
         ? undefined
@@ -3438,6 +3905,11 @@ function onMouseMove(e) {
 
 async function onMouseUp(e) {
   if (!state.loaded) return;
+
+  if (e.button === 0 && state.provinceMoveDrag) {
+    await finishProvinceMoveDrag();
+    return;
+  }
 
   if (e.button === 0 && state.supplyRailDragging) {
     state.supplyRailDragging = false;
@@ -3559,6 +4031,10 @@ async function onMouseUp(e) {
       }
       // 짧은 우클릭 → 스포이드 (다른 모드)
       const [x, y] = screenToPixel(e.clientX, e.clientY);
+      if (state.mode === 'move') {
+        deselectProvinceForMove(x, y);
+        return;
+      }
       if (state.mode === 'state' || state.mode === 'region') {
         await unassignAreaAtPixel(x, y, state.mode);
         return;
@@ -3624,6 +4100,11 @@ function onWheel(e) {
 }
 
 function onKeyDown(e) {
+  if (e.key === 'Escape' && !$('#province-tool-menu')?.hidden) {
+    setProvinceToolMenuOpen(false);
+    e.preventDefault();
+    return;
+  }
   if (e.key === 'Escape' && !$('#support-editor-menu')?.hidden) {
     setSupportEditorMenuOpen(false);
     e.preventDefault();
@@ -3928,9 +4409,17 @@ async function undo() {
     redoChanges.push([x, y, cur[0], cur[1], cur[2]]);
     setPixelRaw(x, y, r, g, b);
   }
-  state.redoStack.push({ kind: 'province', changes: redoChanges });
+  const provinceHistoryKind = stroke.kind === 'province_move'
+    ? 'province_move' : 'province';
+  state.redoStack.push({ kind: provinceHistoryKind, changes: redoChanges });
   flushCanvas();
-  syncPixelGroupToBackend(stroke.changes);
+  await syncPixelGroupToBackend(stroke.changes);
+  state.stateImageDirty = true;
+  state.regionImageDirty = true;
+  state.protectOverlayDirty = true;
+  state.supplyCentroids = null;
+  state.supplySelectionKey = '';
+  if (provinceHistoryKind === 'province_move') renderProvinceMoveSelection();
   updateUndoButtons();
   markProvinceBordersDirty(stroke.changes);
   // 마커 갱신
@@ -4100,9 +4589,17 @@ async function redo() {
     undoChanges.push([x, y, cur[0], cur[1], cur[2]]);
     setPixelRaw(x, y, r, g, b);
   }
-  state.undoStack.push({ kind: 'province', changes: undoChanges });
+  const provinceHistoryKind = stroke.kind === 'province_move'
+    ? 'province_move' : 'province';
+  state.undoStack.push({ kind: provinceHistoryKind, changes: undoChanges });
   flushCanvas();
-  syncPixelGroupToBackend(stroke.changes);
+  await syncPixelGroupToBackend(stroke.changes);
+  state.stateImageDirty = true;
+  state.regionImageDirty = true;
+  state.protectOverlayDirty = true;
+  state.supplyCentroids = null;
+  state.supplySelectionKey = '';
+  if (provinceHistoryKind === 'province_move') renderProvinceMoveSelection();
   updateUndoButtons();
   markProvinceBordersDirty(stroke.changes);
   scanXcrossingsNear(stroke.changes.map(c => [c[0], c[1]]));
@@ -4235,6 +4732,8 @@ async function applyLoadedMap(result) {
   state.selectedRegionId = null;
   state.stateImageDirty = true;
   state.regionImageDirty = true;
+  state.stateBorderImageData = null;
+  state.stateBordersDirty = true;
   state.regionImageData = null;
 
   canvas.width = state.width;
@@ -4253,6 +4752,14 @@ async function applyLoadedMap(result) {
   supplySvg.setAttribute('height', String(state.height));
   supplySelectionCanvas.width = state.width;
   supplySelectionCanvas.height = state.height;
+  provinceMoveHoleCanvas.width = state.width;
+  provinceMoveHoleCanvas.height = state.height;
+  provinceMoveCanvas.width = state.width;
+  provinceMoveCanvas.height = state.height;
+  state.provinceMoveSelectedIds = new Set();
+  state.provinceMoveSelectedPixels = new Uint32Array(0);
+  state.provinceMoveBounds = null;
+  state.provinceMoveDrag = null;
   state.supplySelectionImageData = supplySelectionCtx.createImageData(
     state.width, state.height,
   );
@@ -4391,6 +4898,8 @@ async function applyLoadedMap(result) {
   state.redoStack = [];
   state.historyBusy = false;
   state.stateImageDirty = true;
+  state.stateBorderImageData = null;
+  state.stateBordersDirty = true;
   setXcrossings([]);  // 마커 초기화
   setOnePxMarkers([]);
   clearExclaveMarkers();
@@ -4675,6 +5184,7 @@ async function onSaveConfirm() {
     // 할당 맵 캐시 무효화 (탭 다시 들어가면 재구성)
     state.stateImageDirty = true;
     state.regionImageDirty = true;
+    markStateBordersDirty();
     if (state.mode === 'state') {
       ensureStateImageData();
       ctx.putImageData(state.stateImageData, 0, 0);
@@ -4796,26 +5306,41 @@ window.addEventListener('pywebviewready', () => {
   $('#tab-state').addEventListener('click', () => setMode('state'));
   $('#tab-region').addEventListener('click', () => setMode('region'));
   $('#tab-split').addEventListener('click', () => setMode('split'));
+  $('#tab-province-move').addEventListener('click', () => setMode('move'));
   $('#tab-terrain').addEventListener('click', () => setMode('terrain'));
   $('#tab-heightmap').addEventListener('click', () => setMode('heightmap'));
   $('#action-world-normal').addEventListener('click', generateWorldNormalNow);
   $('#tab-rivers').addEventListener('click', () => setMode('rivers'));
   $('#tab-supply').addEventListener('click', () => setMode('supply'));
   $('#tab-reference').addEventListener('click', () => setMode('reference'));
+  const provinceToolMenuButton = $('#btn-province-tools');
+  const provinceToolMenu = $('#province-tool-menu');
+  provinceToolMenuButton.addEventListener('click', event => {
+    event.stopPropagation();
+    setSupportEditorMenuOpen(false);
+    setProvinceToolMenuOpen(provinceToolMenu.hidden);
+  });
+  provinceToolMenu.addEventListener('click', event => event.stopPropagation());
   const supportMenuButton = $('#btn-support-editors');
   const supportMenu = $('#support-editor-menu');
   supportMenuButton.addEventListener('click', event => {
     event.stopPropagation();
+    setProvinceToolMenuOpen(false);
     setSupportEditorMenuOpen(supportMenu.hidden);
   });
   supportMenu.addEventListener('click', event => event.stopPropagation());
-  document.addEventListener('click', () => setSupportEditorMenuOpen(false));
+  document.addEventListener('click', () => {
+    setSupportEditorMenuOpen(false);
+    setProvinceToolMenuOpen(false);
+  });
   window.addEventListener('resize', () => {
     if (!supportMenu.hidden) setSupportEditorMenuOpen(true);
+    if (!provinceToolMenu.hidden) setProvinceToolMenuOpen(true);
   });
   const tabAdjEl = document.getElementById('tab-adjacency');
   if (tabAdjEl) tabAdjEl.addEventListener('click', () => setMode('adjacency'));
   $('#btn-split-run').addEventListener('click', runAutoSplit);
+  $('#btn-province-move-clear').addEventListener('click', clearProvinceMoveSelection);
   const noiseSlider = $('#split-noise-input');
   const noiseReadout = $('#split-noise-readout');
   if (noiseSlider && noiseReadout) {
@@ -4933,6 +5458,15 @@ window.addEventListener('pywebviewready', () => {
   borderWidth.addEventListener('input', () => {
     const width = Math.max(0.1, Number(borderWidth.value) || 0.65);
     borderWidthReadout.textContent = `${width.toFixed(2)}px`;
+    scheduleProvinceBorderRender();
+  });
+  const stateBorderToggle = $('#layer-state-border-toggle');
+  stateBorderToggle.addEventListener('change', () => refreshProvinceBorders(true));
+  const stateBorderWidth = $('#layer-state-border-width');
+  const stateBorderWidthReadout = $('#layer-state-border-width-readout');
+  stateBorderWidth.addEventListener('input', () => {
+    const width = Math.max(0.1, Number(stateBorderWidth.value) || 1.1);
+    stateBorderWidthReadout.textContent = `${width.toFixed(2)}px`;
     scheduleProvinceBorderRender();
   });
 
@@ -5058,6 +5592,8 @@ window.addEventListener('pywebviewready', () => {
     provinceBorderRenderer = null;
     state.provinceBordersDirty = true;
     state.provinceBorderDirtyBounds = null;
+    state.stateBordersDirty = true;
+    state.stateBorderImageData = null;
     provinceBorderCanvas.style.display = 'none';
     setStatus('GPU 경계 렌더러가 일시 중단되었습니다.');
   });
@@ -5065,6 +5601,8 @@ window.addEventListener('pywebviewready', () => {
     provinceBorderRenderer = null;
     state.provinceBordersDirty = true;
     state.provinceBorderDirtyBounds = null;
+    state.stateBordersDirty = true;
+    state.stateBorderImageData = null;
     refreshProvinceBorders(true);
   });
 

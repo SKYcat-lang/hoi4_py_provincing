@@ -337,7 +337,8 @@ input[type="range"] {
 }
 
 #map-canvas, #overlay-canvas, #protect-canvas, #heightmap-layer-canvas,
-#terrain-layer-canvas, #rivers-layer-canvas, #supply-selection-canvas {
+#terrain-layer-canvas, #rivers-layer-canvas, #supply-selection-canvas,
+#province-move-hole-canvas, #province-move-canvas {
   display: block;
   image-rendering: pixelated;
   image-rendering: -moz-crisp-edges;
@@ -348,7 +349,8 @@ input[type="range"] {
   transform-origin: 0 0;
 }
 #heightmap-layer-canvas,
-#terrain-layer-canvas, #rivers-layer-canvas, #supply-selection-canvas {
+#terrain-layer-canvas, #rivers-layer-canvas, #supply-selection-canvas,
+#province-move-hole-canvas, #province-move-canvas {
   pointer-events: none;
   /* 기본 숨김. JS가 토글 시 visibility/opacity 갱신 */
   opacity: 0;
@@ -356,6 +358,12 @@ input[type="range"] {
 #supply-selection-canvas {
   pointer-events: none;
   z-index: 13;
+}
+#province-move-hole-canvas {
+  z-index: 15;
+}
+#province-move-canvas {
+  z-index: 16;
 }
 #supply-svg {
   position: absolute;
@@ -428,6 +436,15 @@ input[type="range"] {
   display: none;
   pointer-events: none;
   z-index: 25;
+}
+.state-border-color {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 5px;
+  border-radius: 50%;
+  background: #ff4fa3;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.45);
 }
 #support-brush-preview {
   position: absolute;
@@ -1007,6 +1024,24 @@ input[type="range"] {
 }
 .support-bottom-panel.hidden {
   display: none;
+}
+.province-move-panel {
+  width: auto;
+  min-width: min(720px, calc(100% - 40px));
+  max-width: calc(100% - 40px);
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+}
+.province-move-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.province-move-copy span {
+  color: var(--muted);
+  font-size: 11px;
 }
 .support-panel-header {
   display: flex;

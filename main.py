@@ -80,6 +80,7 @@ from core.support_editors import (
     validate_supply_network as validate_supply_buffer,
 )
 from core.province_analyzer import find_adjacent_colors
+from core.province_mover import move_province_group
 from core.xcrossing import find_all_xcrossings, find_xcrossings_near
 from core.validators import (
     find_exclaves,
@@ -1400,6 +1401,36 @@ class Api:
             "ok": True,
             "liveCount": count,
             "definitionCount": len(self.provinces),
+        }
+
+    def move_provinces(self, province_ids: list[int], dx: int, dy: int) -> dict:
+        """Translate all pixels belonging to the selected province IDs."""
+        if self.provinces_arr is None:
+            return {"ok": False, "error": "맵이 로드되지 않았습니다."}
+
+        requested_ids = {int(province_id) for province_id in province_ids}
+        by_id = {province.id: province for province in self.provinces}
+        missing = sorted(requested_ids - set(by_id))
+        if missing:
+            return {
+                "ok": False,
+                "error": f"definition.csv에 없는 프로빈스 ID입니다: {missing[0]}",
+            }
+        selected_rgbs = [by_id[province_id].rgb for province_id in requested_ids]
+        try:
+            result = move_province_group(
+                self.provinces_arr, selected_rgbs, int(dx), int(dy)
+            )
+        except (TypeError, ValueError) as exc:
+            return {"ok": False, "error": str(exc)}
+
+        return {
+            "ok": True,
+            "changedPixels": result["changes"],
+            "selectedPixelCount": result["selectedPixelCount"],
+            "bounds": result["bounds"],
+            "dx": result["dx"],
+            "dy": result["dy"],
         }
 
     # -------- 자동 분할 ----------
