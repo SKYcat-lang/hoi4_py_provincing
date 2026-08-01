@@ -184,20 +184,22 @@ class SupportBitmapTests(unittest.TestCase):
                 self.assertEqual(int.from_bytes(bitmap.read(2), "little"), 8)
 
     def test_world_normal_generation_and_24_bit_save(self) -> None:
-        flat = np.full((3, 5), 95, dtype=np.uint8)
+        flat = np.full((6, 10), 95, dtype=np.uint8)
         flat_normal = generate_world_normal(flat)
         np.testing.assert_array_equal(
             flat_normal,
             np.full((3, 5, 3), [128, 128, 255], dtype=np.uint8),
         )
 
-        east_ramp = np.tile(np.array([0, 10, 20, 30, 40], dtype=np.uint8), (3, 1))
+        east_ramp = np.tile(
+            np.arange(0, 100, 10, dtype=np.uint8), (6, 1)
+        )
         east_normal = generate_world_normal(east_ramp)
         self.assertLess(int(east_normal[1, 2, 0]), 128)
         self.assertEqual(int(east_normal[1, 2, 1]), 128)
 
         south_ramp = np.tile(
-            np.array([[0], [10], [20]], dtype=np.uint8), (1, 5)
+            np.arange(0, 60, 10, dtype=np.uint8)[:, None], (1, 10)
         )
         south_normal = generate_world_normal(south_ramp)
         self.assertGreater(int(south_normal[1, 2, 1]), 128)
@@ -323,6 +325,47 @@ class SupportEditorApiTests(unittest.TestCase):
             )
             self.assertEqual(first.province_ids, [11])
             self.assertEqual(second.province_ids, [10, 20])
+
+    def test_support_lasso_moves_clear_source_and_keep_overlap(self) -> None:
+        from core.definitions import Province
+        from main import Api
+
+        api = Api()
+        api.terrain_arr = np.array([[1, 2, 3, 4]], dtype=np.uint8)
+        api.terrain_palette = []
+        terrain_result = api.move_terrain_selection([1, 2], 1, 0)
+
+        self.assertTrue(terrain_result["ok"])
+        self.assertEqual(api.terrain_arr.tolist(), [[1, 0, 2, 3]])
+        self.assertEqual(terrain_result["selectedPixels"], [2, 3])
+        self.assertTrue(api.terrain_dirty)
+
+        api.heightmap_arr = np.array(
+            [[10, 20], [30, 40], [50, 60]], dtype=np.uint8
+        )
+        height_result = api.move_heightmap_selection([0, 1], 0, 1)
+
+        self.assertTrue(height_result["ok"])
+        self.assertEqual(api.heightmap_arr.tolist(), [[0, 0], [10, 20], [50, 60]])
+        self.assertEqual(height_result["selectedPixels"], [2, 3])
+        self.assertTrue(api.heightmap_dirty)
+        self.assertTrue(api.world_normal_stale)
+
+        land = [10, 0, 0]
+        sea = [0, 0, 10]
+        api.provinces_arr = np.array([[land, land, sea, sea]], dtype=np.uint8)
+        api.provinces = [
+            Province(1, *land, type="land"),
+            Province(2, *sea, type="sea"),
+        ]
+        api.rivers_arr = np.array([[0, 3, 4, 5]], dtype=np.uint8)
+        api.rivers_palette = [[i, i, i] for i in range(256)]
+        river_result = api.move_rivers_selection([0, 2], 1, 0)
+
+        self.assertTrue(river_result["ok"])
+        self.assertEqual(api.rivers_arr.tolist(), [[255, 0, 254, 4]])
+        self.assertEqual(river_result["selectedPixels"], [1, 3])
+        self.assertTrue(api.rivers_dirty)
 
     def test_heightmap_and_river_changes_are_exact(self) -> None:
         from main import Api
@@ -453,18 +496,43 @@ class SupportEditorApiTests(unittest.TestCase):
         self.assertTrue(result["changedPixels"])
         self.assertTrue(np.all(api.heightmap_arr[:, 0] == before[:, 0]))
         self.assertEqual(int(api.heightmap_arr[3, 1]), 80)
-        self.assertTrue(np.all(api.heightmap_arr[:3, 2] == 96))
-        self.assertGreater(int(api.heightmap_arr[0, 3]), 96)
+        self.assertTrue(np.all(api.heightmap_arr[:3, 2] == 94))
+        self.assertGreater(int(api.heightmap_arr[0, 3]), 94)
         self.assertLess(int(api.heightmap_arr[0, 3]), 130)
         self.assertTrue(np.array_equal(api.heightmap_arr[:, 4:], before[:, 4:]))
         self.assertTrue(all(len(change) == 4 for change in result["changedPixels"]))
         self.assertTrue(api.heightmap_dirty)
         self.assertTrue(api.world_normal_stale)
 
+        api.heightmap_arr = before.copy()
+        width_one = api.smooth_heightmap_coast(0, 0, 1, 100)
+        self.assertTrue(width_one["ok"])
+        self.assertEqual(width_one["width"], 1)
+        self.assertEqual(int(api.heightmap_arr[0, 2]), 94)
+        self.assertEqual(int(api.heightmap_arr[0, 3]), 130)
+
+        api.heightmap_arr = before.copy()
+        half_strength = api.smooth_heightmap_coast(0, 0, 1, 50)
+        self.assertTrue(half_strength["ok"])
+        self.assertEqual(half_strength["shoreHeight"], 94)
+        self.assertEqual(int(api.heightmap_arr[0, 2]), 112)
+        repeated = api.smooth_heightmap_coast(0, 0, 1, 50)
+        self.assertTrue(repeated["ok"])
+        self.assertEqual(int(api.heightmap_arr[0, 2]), 103)
+
         unchanged = api.heightmap_arr.copy()
         rejected = api.smooth_heightmap_coast(2, 0, 3, 100)
         self.assertFalse(rejected["ok"])
         self.assertTrue(np.array_equal(api.heightmap_arr, unchanged))
+
+        lake_result = api.smooth_heightmap_coast(1, 3, 3, 100)
+        self.assertTrue(lake_result["ok"])
+        self.assertEqual(lake_result["waterProvinceId"], 6)
+        self.assertEqual(lake_result["waterType"], "lake")
+        self.assertEqual(lake_result["waterLevel"], 80)
+        self.assertEqual(lake_result["adjacentProvinceIds"], [3])
+        self.assertTrue(lake_result["changedPixels"])
+        self.assertEqual(int(api.heightmap_arr[3, 1]), 80)
 
     def test_world_normal_action_writes_current_live_heightmap(self) -> None:
         from main import Api
@@ -472,7 +540,7 @@ class SupportEditorApiTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="hoi4_normal_api_") as folder:
             path = os.path.join(folder, "world_normal.bmp")
             api = Api()
-            api.heightmap_arr = np.full((2, 3), 95, dtype=np.uint8)
+            api.heightmap_arr = np.full((4, 6), 95, dtype=np.uint8)
             api.heightmap_dirty = True
             api.world_normal_stale = True
             api.paths = SimpleNamespace(world_normal_bmp=path)
@@ -513,6 +581,23 @@ class SupportEditorApiTests(unittest.TestCase):
         kinds = {issue["kind"] for issue in result["issues"]}
         self.assertIn("source_count", kinds)
         self.assertIn("thick_2x2", kinds)
+
+    def test_river_topology_does_not_mislabel_split_rejoin_as_cycle(self) -> None:
+        from main import Api
+
+        api = Api()
+        api.rivers_arr = np.full((5, 6), 255, dtype=np.uint8)
+        api.rivers_arr[2, 0:3] = [0, 3, 2]
+        api.rivers_arr[1, 2:5] = [3, 3, 3]
+        api.rivers_arr[3, 2:5] = [3, 3, 3]
+        api.rivers_arr[2, 4] = 1
+        api.rivers_palette = [[i, i, i] for i in range(256)]
+
+        result = api.validate_river_topology()
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["valid"])
+        self.assertEqual(result["issues"], [])
 
     def test_supply_network_requires_stateful_adjacent_land_provinces(self) -> None:
         from core.definitions import Province

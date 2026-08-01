@@ -7,6 +7,7 @@
 </head>
 <body>
   <header id="topbar">
+    <div class="topbar-row topbar-primary">
     <!-- 공통: 파일 -->
     <div class="tb-group">
       <button id="btn-open" title="맵 폴더 열기">
@@ -106,6 +107,13 @@
           <path d="M19 16c1 2 2 3 2 4a2 2 0 0 1-4 0c0-1 1-2 2-4z" fill="currentColor" stroke="none"/>
         </svg>
       </button>
+      <button id="btn-tool-lasso" class="tool-btn support-lasso-only" hidden
+              title="올가미 이동 (L) · 드래그로 선택 후 선택 내부를 드래그해 이동">
+        <svg class="icon icon-lg" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M5 7c2-4 11-4 14 0s-1 9-7 9S2 12 5 7z"/>
+          <path d="M12 16c0 3-1 5-4 5"/>
+        </svg>
+      </button>
       <button id="btn-pick-color" class="province-only" title="현재 색을 사용 안 된 새 색으로 발급">
         <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
           <circle cx="12" cy="12" r="9"/>
@@ -149,11 +157,29 @@
 
     <!-- (X-crossing 검사는 우상단 [검증] 패널로 이동됨) -->
 
+      <!-- 우측 끝: 상태 -->
+      <span id="status">맵을 로드해주세요</span>
+    </div>
+
     <!-- 모드별 정보 표시 (공간은 동일) -->
+    <div class="topbar-row topbar-context">
     <div class="tb-group info-group province-only">
       <span class="label">현재 색</span>
       <span id="current-swatch" class="swatch"></span>
       <span id="current-rgb" class="rgb-text">#FF0000</span>
+      <label class="label" for="province-color-r">R</label>
+      <input id="province-color-r" class="compact-number province-rgb-input"
+             type="number" min="0" max="255" step="1" value="255" />
+      <label class="label" for="province-color-g">G</label>
+      <input id="province-color-g" class="compact-number province-rgb-input"
+             type="number" min="0" max="255" step="1" value="0" />
+      <label class="label" for="province-color-b">B</label>
+      <input id="province-color-b" class="compact-number province-rgb-input"
+             type="number" min="0" max="255" step="1" value="0" />
+      <button id="btn-apply-province-rgb" type="button"
+              title="입력한 RGB를 현재 프로빈스 색으로 선택 · 이미 사용 중인 색도 허용">
+        RGB 적용
+      </button>
     </div>
     <div class="tb-group info-group terrain-only" hidden>
       <span class="label">현재 지형</span>
@@ -162,17 +188,20 @@
     </div>
     <div class="tb-group info-group heightmap-only" hidden>
       <button id="btn-height-coast-smooth" class="tool-btn height-coast-tool"
-              type="button" title="바다 프로빈스를 클릭해 인접 육지의 해안 고도를 자동으로 다듬기">
+              type="button" title="바다 또는 호수 프로빈스를 클릭해 인접 육지의 수변 고도를 자동으로 다듬기">
         <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
           <path d="M3 15c3-4 5-4 8 0s5 4 10 0"/>
           <path d="M3 19c3-4 5-4 8 0s5 4 10 0"/>
           <path d="M4 10c3 0 4-5 8-5s5 4 8 4"/>
         </svg>
-        <span>해안 다듬기</span>
+        <span>수변 다듬기</span>
       </button>
       <label class="label" for="height-coast-width">해안 폭</label>
       <input id="height-coast-width" class="compact-number" type="number"
-             min="2" max="128" step="1" value="12" title="해안에서 육지 안쪽으로 만들 경사 폭 (맵 픽셀)" />
+             min="1" max="128" step="1" value="2" title="수변에서 육지 안쪽으로 만들 경사 폭 (맵 픽셀)" />
+      <label class="label" for="height-coast-opacity">투명도</label>
+      <input id="height-coast-opacity" class="compact-number" type="number"
+             min="1" max="100" step="1" value="50" title="한 번 클릭할 때 목표 고도 94를 반영하는 비율 (%)" />
       <label class="label" for="height-brush-size">브러시 크기</label>
       <input id="height-brush-size" class="compact-number" type="number"
              min="1" max="256" step="1" value="32" title="브러시 지름 (맵 픽셀) · [ / ] 단축키" />
@@ -183,7 +212,7 @@
       <input id="height-brush-value" class="compact-number" type="number"
              min="0" max="255" step="1" value="110" title="0=최저, 95=기본 해수면, 255=최고" />
       <span id="height-brush-readout" class="rgb-text">11.0 / 육지</span>
-      <label class="toggle" title="높이값 0~255를 파랑→빨강 HSV 색상각으로 표시합니다. 실제 높이값과 스포이드는 바뀌지 않습니다.">
+      <label class="toggle" title="높이값 89=파랑, 160=빨강으로 HSV 색상각을 표시합니다. 실제 높이값과 스포이드는 바뀌지 않습니다.">
         <input type="checkbox" id="toggle-heightmap-hue" />
         <span>고도 색상각</span>
       </label>
@@ -245,8 +274,7 @@
       </button>
     </div>
 
-    <!-- 우측 끝: 상태 -->
-    <span id="status">맵을 로드해주세요</span>
+    </div>
   </header>
 
   <div id="province-tool-menu" class="support-editor-menu province-tool-menu" hidden
@@ -281,6 +309,17 @@
   <div id="support-editor-menu" class="support-editor-menu" hidden
        role="menu" aria-label="맵 지원 편집">
     <div class="support-editor-menu-title">맵 지원 편집</div>
+    <button id="action-create-state" class="support-editor-item" type="button"
+            role="menuitem" title="새 스테이트 파일 생성">
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M12 5v14M5 12h14"/>
+        <path d="M4 4h16v16H4z" opacity=".35"/>
+      </svg>
+      <span class="support-editor-item-copy">
+        <strong>새 스테이트 생성</strong>
+        <small>새 ID · history/states 파일 생성</small>
+      </span>
+    </button>
     <button id="tab-adjacency" class="support-editor-item" type="button"
             role="menuitem" title="adjacencies.csv 편집">
       <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
@@ -362,12 +401,14 @@
       <canvas id="protect-canvas"></canvas>
       <canvas id="province-move-hole-canvas"></canvas>
       <canvas id="province-move-canvas"></canvas>
+      <canvas id="support-lasso-canvas"></canvas>
       <div id="reference-layer-host"></div>
       <canvas id="overlay-canvas"></canvas>
     </div>
 
     <!-- 화면 좌표 WebGL 경계 레이어: 줌과 무관한 고정 두께 -->
     <canvas id="province-border-canvas"></canvas>
+    <canvas id="selection-gpu-canvas" aria-hidden="true"></canvas>
     <div id="support-brush-preview" aria-hidden="true"></div>
 
     <!-- 줌/팬과 무관한 마커 레이어 (화면 픽셀 기준 크기 고정) -->
@@ -619,6 +660,30 @@
       <button id="btn-province-move-clear" type="button">전체 선택 해제</button>
     </div>
 
+    <div id="state-editor-bar" class="support-bottom-panel state-editor-panel hidden"
+         aria-hidden="true">
+      <div class="support-panel-header state-editor-header">
+        <div>
+          <strong>스테이트 내부 항목</strong>
+          <span id="state-editor-selection">캔버스에서 스테이트를 선택하세요.</span>
+        </div>
+        <div class="state-editor-actions">
+          <button id="btn-state-history-open" type="button" disabled>전체 원문 편집</button>
+          <button id="btn-state-properties-save" class="primary" type="button" disabled>속성 저장</button>
+        </div>
+      </div>
+      <div class="state-property-row">
+        <label><span>인구 (manpower)</span><input id="state-manpower" type="number" min="0" step="1" disabled></label>
+        <label><span>개발도 (state_category)</span><select id="state-category" disabled></select></label>
+        <label><span>지역 보급 (local_supplies)</span><input id="state-local-supplies" type="number" min="0" step="0.1" disabled></label>
+      </div>
+      <div class="state-resource-section">
+        <strong>리소스</strong>
+        <div id="state-resource-grid" class="state-resource-grid"></div>
+      </div>
+      <div class="support-panel-hint">일반 속성 저장은 history를 건드리지 않습니다. 전체 원문 편집은 파일에만 저장되며 현재 지도 상태에는 즉시 반영되지 않습니다.</div>
+    </div>
+
     <div id="supply-editor-bar" class="support-bottom-panel supply-editor-panel hidden"
          aria-hidden="true">
       <div class="supply-tool-row">
@@ -668,6 +733,55 @@
     </span>
     <span id="zoom-info">100%</span>
   </footer>
+
+  <div id="state-history-dialog" class="dialog hidden" role="dialog" aria-modal="true"
+       aria-labelledby="state-history-title">
+    <div class="dialog-inner state-history-dialog-inner">
+      <div class="state-history-title-row">
+        <div>
+          <h2 id="state-history-title">스테이트 원문 편집</h2>
+          <p id="state-history-target-label">선택된 스테이트</p>
+        </div>
+        <span class="state-history-warning">파일 전체를 그대로 저장합니다. 효과·스코프의 유효성은 직접 확인하세요.</span>
+      </div>
+      <div class="state-history-layout">
+        <section class="state-history-editor-pane">
+          <div class="state-history-pane-title">
+            <strong>편집할 state 전체 코드</strong>
+            <span>id, provinces, history를 포함한 파일 원문</span>
+          </div>
+          <textarea id="state-history-editor" spellcheck="false" wrap="off"></textarea>
+        </section>
+        <section class="state-history-reference-pane">
+          <div class="state-history-pane-title">
+            <strong>인접 스테이트 예시</strong>
+            <span>공유 경계 → 연결 인접 → 가까운 순서 · 최대 3개</span>
+          </div>
+          <div id="state-history-reference-list" class="state-history-reference-list"></div>
+        </section>
+      </div>
+      <div class="dialog-buttons">
+        <button id="btn-state-history-cancel" type="button">닫기</button>
+        <button id="btn-state-history-save" class="primary" type="button">전체 코드 저장</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="state-create-dialog" class="dialog hidden" role="dialog" aria-modal="true"
+       aria-labelledby="state-create-title">
+    <div class="dialog-inner state-create-dialog-inner">
+      <h2 id="state-create-title">새 스테이트 생성</h2>
+      <p>입력한 문구는 state 파일명에만 사용됩니다. YML은 만들지 않습니다. 생성 직후 자동 선택되며, 스테이트 모드에서 Shift+좌클릭으로 프로빈스를 할당하세요.</p>
+      <label class="state-create-field">
+        <span>파일명</span>
+        <input id="state-create-name" type="text" maxlength="120" autocomplete="off" placeholder="예: New State">
+      </label>
+      <div class="dialog-buttons">
+        <button id="btn-state-create-cancel" type="button">취소</button>
+        <button id="btn-state-create-confirm" class="primary" type="button">스테이트 생성</button>
+      </div>
+    </div>
+  </div>
 
   <!-- 저장 다이얼로그 -->
   <div id="save-dialog" class="dialog hidden">

@@ -49,6 +49,65 @@ def apply_terrain_changes(
     return applied
 
 
+def move_scalar_selection(
+    layer: np.ndarray,
+    pixel_indices: Iterable[int],
+    dx: int,
+    dy: int,
+    empty_value: int | np.ndarray = 0,
+) -> dict:
+    """Move selected pixels in a 2-D 8-bit layer and clear their source."""
+    if layer.ndim != 2:
+        raise ValueError("이동 대상은 2차원 8비트 맵이어야 합니다.")
+    height, width = layer.shape
+    offset_x = int(dx)
+    offset_y = int(dy)
+    if isinstance(empty_value, np.ndarray):
+        if empty_value.shape != layer.shape:
+            raise ValueError("빈 배경값 배열과 이동 대상의 크기가 다릅니다.")
+        empty_values = empty_value.reshape(-1)
+    else:
+        empty = max(0, min(255, int(empty_value)))
+        empty_values = None
+    selected = sorted({int(pixel) for pixel in pixel_indices})
+    if not selected:
+        return {"changedPixels": [], "selectedPixels": []}
+
+    source_values: list[int] = []
+    destinations: list[int] = []
+    for pixel in selected:
+        if not 0 <= pixel < width * height:
+            raise ValueError("올가미 선택 픽셀이 맵 범위를 벗어났습니다.")
+        x = pixel % width
+        y = pixel // width
+        destination_x = x + offset_x
+        destination_y = y + offset_y
+        if not (0 <= destination_x < width and 0 <= destination_y < height):
+            raise ValueError("올가미 이동 결과가 맵 범위를 벗어납니다.")
+        source_values.append(int(layer[y, x]))
+        destinations.append(destination_y * width + destination_x)
+
+    desired: dict[int, int] = {
+        pixel: int(empty_values[pixel]) if empty_values is not None else empty
+        for pixel in selected
+    }
+    for destination, value in zip(destinations, source_values):
+        desired[destination] = value
+
+    changed: list[list[int]] = []
+    flat = layer.reshape(-1)
+    for pixel, value in sorted(desired.items()):
+        old_value = int(flat[pixel])
+        if old_value == value:
+            continue
+        flat[pixel] = value
+        changed.append([pixel % width, pixel // width, old_value, value])
+    return {
+        "changedPixels": changed,
+        "selectedPixels": destinations,
+    }
+
+
 def province_color_at(provinces: np.ndarray, x: int, y: int) -> tuple[int, int, int]:
     """Return the live province colour at a map coordinate."""
     height, width = provinces.shape[:2]
@@ -218,13 +277,13 @@ def smooth_heightmap_coast(
     province_definitions: Iterable[Province],
     x: int,
     y: int,
-    width: int = 12,
-    strength: float = 1.0,
+    width: int = 2,
+    strength: float = 0.5,
 ) -> dict:
-    """Build a soft land-side height ramp along one sea province.
+    """Build a soft land-side height ramp along one sea or lake province.
 
-    Only land provinces that touch the clicked sea province orthogonally are
-    eligible.  Sea/lake pixels and land provinces behind the first row of
+    Only land provinces that touch the clicked water province orthogonally are
+    eligible.  Water pixels and land provinces behind the first row of
     coastal provinces are therefore never modified.  ``changedPixels`` uses
     ``[x, y, old_value, new_value]`` records so the caller can render and
     register one exact undo step.
@@ -243,22 +302,22 @@ def smooth_heightmap_coast(
     definitions_by_rgb = {
         province.rgb: province for province in province_definitions
     }
-    sea_rgb = province_color_at(provinces, x, y)
-    sea_province = definitions_by_rgb.get(sea_rgb)
-    if sea_province is None:
+    water_rgb = province_color_at(provinces, x, y)
+    water_province = definitions_by_rgb.get(water_rgb)
+    if water_province is None:
         raise ValueError("definition.csv에 등록되지 않은 프로빈스입니다.")
-    if sea_province.type != "sea":
-        raise ValueError("해안 다듬기 도구로 바다 프로빈스를 클릭하세요.")
+    if water_province.type not in {"sea", "lake"}:
+        raise ValueError("수변 다듬기 도구로 바다 또는 호수 프로빈스를 클릭하세요.")
 
     rgb = provinces[..., :3]
-    sea_mask = np.all(rgb == sea_rgb, axis=2)
+    water_mask = np.all(rgb == water_rgb, axis=2)
 
-    # Pixels on the land side of the selected sea/land boundary.
-    touches_sea = np.zeros((height, map_width), dtype=bool)
-    touches_sea[1:, :] |= sea_mask[:-1, :]
-    touches_sea[:-1, :] |= sea_mask[1:, :]
-    touches_sea[:, 1:] |= sea_mask[:, :-1]
-    touches_sea[:, :-1] |= sea_mask[:, 1:]
+    # Pixels on the land side of the selected water/land boundary.
+    touches_water = np.zeros((height, map_width), dtype=bool)
+    touches_water[1:, :] |= water_mask[:-1, :]
+    touches_water[:-1, :] |= water_mask[1:, :]
+    touches_water[:, 1:] |= water_mask[:, :-1]
+    touches_water[:, :-1] |= water_mask[:, 1:]
 
     packed = (
         (rgb[..., 0].astype(np.uint32) << 16)
@@ -276,21 +335,27 @@ def smooth_heightmap_coast(
     if not land_keys.size:
         return {
             "changedPixels": [],
-            "seaProvinceId": sea_province.id,
+            "seaProvinceId": water_province.id,
+            "waterProvinceId": water_province.id,
+            "waterType": water_province.type,
             "adjacentProvinceIds": [],
-            "seaLevel": int(np.median(heightmap[sea_mask])),
+            "seaLevel": int(np.median(heightmap[water_mask])),
+            "waterLevel": int(np.median(heightmap[water_mask])),
             "width": ramp_width,
         }
 
     is_land = np.isin(packed, land_keys)
-    boundary = touches_sea & is_land
+    boundary = touches_water & is_land
     adjacent_keys = np.unique(packed[boundary])
     if not adjacent_keys.size:
         return {
             "changedPixels": [],
-            "seaProvinceId": sea_province.id,
+            "seaProvinceId": water_province.id,
+            "waterProvinceId": water_province.id,
+            "waterType": water_province.type,
             "adjacentProvinceIds": [],
-            "seaLevel": int(np.median(heightmap[sea_mask])),
+            "seaLevel": int(np.median(heightmap[water_mask])),
+            "waterLevel": int(np.median(heightmap[water_mask])),
             "width": ramp_width,
         }
 
@@ -311,10 +376,14 @@ def smooth_heightmap_coast(
     touches_land[:-1, :] |= is_land[1:, :]
     touches_land[:, 1:] |= is_land[:, :-1]
     touches_land[:, :-1] |= is_land[:, 1:]
-    sea_edge = sea_mask & touches_land
-    sea_samples = heightmap[sea_edge] if np.any(sea_edge) else heightmap[sea_mask]
-    sea_level = int(np.median(sea_samples))
-    shore_height = min(255, sea_level + 1)
+    water_edge = water_mask & touches_land
+    water_samples = (
+        heightmap[water_edge] if np.any(water_edge) else heightmap[water_mask]
+    )
+    water_level = int(np.median(water_samples))
+    # The editor's shoreline target is 94. Strength behaves like brush
+    # opacity, allowing repeated manual passes toward that target.
+    shore_height = 94
 
     distance = np.full((height, map_width), -1, dtype=np.int16)
     frontier = boundary.copy()
@@ -349,9 +418,13 @@ def smooth_heightmap_coast(
 
     return {
         "changedPixels": changed,
-        "seaProvinceId": sea_province.id,
+        "seaProvinceId": water_province.id,
+        "waterProvinceId": water_province.id,
+        "waterType": water_province.type,
         "adjacentProvinceIds": adjacent_ids,
-        "seaLevel": sea_level,
+        "seaLevel": water_level,
+        "waterLevel": water_level,
+        "shoreHeight": shore_height,
         "width": ramp_width,
     }
 
@@ -378,7 +451,13 @@ def apply_river_changes(
 
 
 def validate_river_topology(rivers: np.ndarray, max_issues: int = 200) -> dict:
-    """Validate one-pixel, orthogonal river components and source markers."""
+    """Validate reliable pixel-level river rules.
+
+    An undirected pixel graph cannot distinguish a real circular flow from a
+    valid flow-out/flow-in pair (indices 2 and 1) whose branches later rejoin.
+    Cycle diagnostics therefore require flow-direction reconstruction and are
+    deliberately omitted here instead of reporting false positives.
+    """
     height, width = rivers.shape
     issues: list[dict] = []
     river = rivers <= 11
@@ -394,7 +473,6 @@ def validate_river_topology(rivers: np.ndarray, max_issues: int = 200) -> dict:
         visited[start_y, start_x] = True
         component: list[tuple[int, int]] = []
         sources: list[tuple[int, int]] = []
-        edge_count = 0
         while queue:
             x, y = queue.popleft()
             component.append((x, y))
@@ -402,11 +480,9 @@ def validate_river_topology(rivers: np.ndarray, max_issues: int = 200) -> dict:
                 sources.append((x, y))
             for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
                 if 0 <= nx < width and 0 <= ny < height and river[ny, nx]:
-                    edge_count += 1
                     if not visited[ny, nx]:
                         visited[ny, nx] = True
                         queue.append((nx, ny))
-        edge_count //= 2
         source_count += len(sources)
         if len(sources) != 1 and len(issues) < max_issues:
             x, y = component[0]
@@ -414,10 +490,6 @@ def validate_river_topology(rivers: np.ndarray, max_issues: int = 200) -> dict:
                 "kind": "source_count", "x": x, "y": y,
                 "count": len(sources), "pixels": len(component),
             })
-        if edge_count >= len(component) and len(issues) < max_issues:
-            x, y = component[0]
-            issues.append({"kind": "cycle", "x": x, "y": y})
-
     if height > 1 and width > 1:
         blocks = (
             river[:-1, :-1] & river[:-1, 1:] &

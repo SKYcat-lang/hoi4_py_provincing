@@ -35,6 +35,8 @@ from core.map_loader import (
     load_rivers_palette,
     load_supply_nodes,
     load_railways,
+    load_resource_names,
+    load_state_category_names,
     load_state_files,
     load_strategic_regions,
     load_terrain_bmp,
@@ -72,6 +74,7 @@ from core.support_editors import (
     flood_fill_rgb_connected,
     flood_fill_terrain as flood_fill_terrain_buffer,
     insert_supply_railway as insert_supply_railway_buffer,
+    move_scalar_selection,
     normalize_supply_network,
     protected_province_colors,
     province_color_at,
@@ -81,6 +84,15 @@ from core.support_editors import (
 )
 from core.province_analyzer import find_adjacent_colors
 from core.province_mover import move_province_group
+from core.state_creator import create_state as create_state_files
+from core.state_neighbors import rank_adjacent_states
+from core.state_properties import (
+    read_state_history_block,
+    read_state_properties,
+    read_state_source,
+    update_state_properties,
+    update_state_source as write_state_source,
+)
 from core.xcrossing import find_all_xcrossings, find_xcrossings_near
 from core.validators import (
     find_exclaves,
@@ -168,6 +180,8 @@ class Api:
         self.terrain_index_names: dict[int, str] = {}
         self.continents: list[str] = []
         self.states: list[StateInfo] = []
+        self.state_category_names: list[str] = []
+        self.resource_names: list[str] = []
         self.regions: list[StrategicRegionInfo] = []
         self.color_pool: Optional[ColorPool] = None
         # province_id -> state_id 매핑 (사용자가 스테이트 맵에서 편집)
@@ -230,6 +244,12 @@ class Api:
                     paths.common_terrain_dir
                 )
                 self.states = load_state_files(paths.history_states_dir)
+                self.state_category_names = load_state_category_names(
+                    os.path.join(paths.mod_root, "common", "state_category")
+                )
+                self.resource_names = load_resource_names(
+                    os.path.join(paths.mod_root, "common", "resources")
+                )
                 self.regions = load_strategic_regions(paths.strategicregions_dir)
 
                 self.color_pool = ColorPool(p.rgb for p in self.provinces)
@@ -352,6 +372,8 @@ class Api:
                         for pid, region_id in self.region_assignments.items()
                     ],
                     "continents": self.continents,
+                    "stateCategoryNames": self.state_category_names,
+                    "resourceNames": self.resource_names,
                     "terrainCategoryNames": [c.name for c in self.terrain_categories if not c.is_water],
                 }
             except Exception as exc:
@@ -552,6 +574,24 @@ class Api:
             self.terrain_dirty = True
         return {"ok": True, "applied": applied}
 
+    def move_terrain_selection(
+        self, pixel_indices: list[int], dx: int, dy: int
+    ) -> dict:
+        """Move an indexed terrain selection and clear its source to index 0."""
+        error = self._terrain_edit_error()
+        if error:
+            return {"ok": False, "error": error}
+        assert self.terrain_arr is not None
+        try:
+            result = move_scalar_selection(
+                self.terrain_arr, pixel_indices, dx, dy, 0
+            )
+        except (TypeError, ValueError) as exc:
+            return {"ok": False, "error": str(exc)}
+        if result["changedPixels"]:
+            self.terrain_dirty = True
+        return {"ok": True, "applied": len(result["changedPixels"]), **result}
+
     def flood_fill_terrain(self, x: int, y: int, terrain_index: int) -> dict:
         """Fill terrain.bmp inside the clicked province boundary."""
         error = self._terrain_edit_error()
@@ -612,6 +652,25 @@ class Api:
             self.world_normal_stale = True
         return {"ok": True, "applied": applied}
 
+    def move_heightmap_selection(
+        self, pixel_indices: list[int], dx: int, dy: int
+    ) -> dict:
+        """Move a heightmap selection and clear its source to height 0."""
+        error = self._heightmap_edit_error()
+        if error:
+            return {"ok": False, "error": error}
+        assert self.heightmap_arr is not None
+        try:
+            result = move_scalar_selection(
+                self.heightmap_arr, pixel_indices, dx, dy, 0
+            )
+        except (TypeError, ValueError) as exc:
+            return {"ok": False, "error": str(exc)}
+        if result["changedPixels"]:
+            self.heightmap_dirty = True
+            self.world_normal_stale = True
+        return {"ok": True, "applied": len(result["changedPixels"]), **result}
+
     def fill_heightmap_province(
         self,
         x: int,
@@ -656,10 +715,10 @@ class Api:
         self,
         x: int,
         y: int,
-        width: int = 12,
-        strength: int = 100,
+        width: int = 2,
+        strength: int = 50,
     ) -> dict:
-        """Smooth land-side height values along the clicked sea province."""
+        """Smooth land-side height values along the clicked sea or lake."""
         error = self._heightmap_edit_error()
         if error:
             return {"ok": False, "error": error}
@@ -757,6 +816,44 @@ class Api:
             "changedPixels": changed_pixels,
             "applied": len(changed_pixels),
         }
+
+    def move_rivers_selection(
+        self, pixel_indices: list[int], dx: int, dy: int
+    ) -> dict:
+        """Move a rivers.bmp selection and restore land/water backgrounds."""
+        error = self._rivers_edit_error()
+        if error:
+            return {"ok": False, "error": error}
+        if self.provinces_arr is None:
+            return {"ok": False, "error": "provinces.bmp가 로드되지 않았습니다."}
+        assert self.rivers_arr is not None
+
+        rgb = self.provinces_arr[..., :3]
+        packed = (
+            (rgb[..., 0].astype(np.uint32) << 16)
+            | (rgb[..., 1].astype(np.uint32) << 8)
+            | rgb[..., 2].astype(np.uint32)
+        )
+        water_keys = np.fromiter(
+            (
+                (province.r << 16) | (province.g << 8) | province.b
+                for province in self.provinces
+                if province.type in {"sea", "lake"}
+            ),
+            dtype=np.uint32,
+        )
+        background = np.full(self.rivers_arr.shape, 255, dtype=np.uint8)
+        if water_keys.size:
+            background[np.isin(packed, water_keys)] = 254
+        try:
+            result = move_scalar_selection(
+                self.rivers_arr, pixel_indices, dx, dy, background
+            )
+        except (TypeError, ValueError) as exc:
+            return {"ok": False, "error": str(exc)}
+        if result["changedPixels"]:
+            self.rivers_dirty = True
+        return {"ok": True, "applied": len(result["changedPixels"]), **result}
 
     def validate_river_topology(self, max_issues: int = 200) -> dict:
         """Validate the structural rules used by HOI4's rivers.bmp."""
@@ -1222,6 +1319,191 @@ class Api:
             "stateId": state_id,
         }
 
+    def get_state_properties(self, state_id: int) -> dict:
+        """스테이트의 안전한 최상위 속성만 읽는다. history 블록은 해석하지 않는다."""
+        try:
+            sid = int(state_id)
+            state = next((item for item in self.states if item.id == sid), None)
+            if state is None:
+                raise ValueError(f"존재하지 않는 스테이트 ID입니다: {sid}")
+            props = read_state_properties(state.file_path)
+            return {
+                "ok": True,
+                "stateId": sid,
+                "manpower": props.manpower,
+                "stateCategory": props.state_category,
+                "resources": props.resources,
+                "localSupplies": props.local_supplies,
+                "stateCategoryNames": self.state_category_names,
+                "resourceNames": self.resource_names,
+            }
+        except (OSError, TypeError, ValueError) as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def create_state(self, file_label: str, template_state_id: Optional[int] = None) -> dict:
+        """입력값을 파일명에만 사용해 빈 스테이트 파일을 만들고 등록한다."""
+        if self.paths is None:
+            return {"ok": False, "error": "맵을 먼저 로드해주세요."}
+        if not self._lock.acquire(blocking=False):
+            return {"ok": False, "error": "다른 맵 작업이 진행 중입니다. 잠시 후 다시 시도해주세요."}
+        try:
+            clean_label = str(file_label or "").strip()
+            category = "rural"
+            if template_state_id is not None:
+                try:
+                    template_id = int(template_state_id)
+                    template = next(
+                        (item for item in self.states if item.id == template_id), None
+                    )
+                    if template is not None:
+                        inherited = read_state_properties(template.file_path).state_category
+                        if inherited:
+                            category = inherited
+                except (OSError, TypeError, ValueError):
+                    pass
+
+            new_id = max((state.id for state in self.states), default=0) + 1
+            created = create_state_files(
+                self.paths.history_states_dir,
+                new_id,
+                clean_label,
+                state_category=category,
+            )
+            state_info = StateInfo(
+                id=created.state_id,
+                file_path=created.state_file,
+                name=created.localisation_key,
+                province_ids=[],
+            )
+            self.states.append(state_info)
+            self.states.sort(key=lambda item: item.id)
+            return {
+                "ok": True,
+                "state": {
+                    "id": state_info.id,
+                    "name": state_info.name,
+                    "fileName": os.path.basename(state_info.file_path),
+                    "color": list(_state_color_from_id(state_info.id)),
+                    "provinceCount": 0,
+                },
+                "stateCategory": category,
+                "stateFile": created.state_file,
+            }
+        except (OSError, TypeError, ValueError) as exc:
+            return {"ok": False, "error": str(exc)}
+        finally:
+            self._lock.release()
+
+    def update_state_properties(
+        self,
+        state_id: int,
+        manpower: int,
+        state_category: str,
+        resources: dict | None,
+        local_supplies: float,
+    ) -> dict:
+        """스테이트 최상위 속성을 저장하되 history 내용은 그대로 보존한다."""
+        try:
+            sid = int(state_id)
+            state = next((item for item in self.states if item.id == sid), None)
+            if state is None:
+                raise ValueError(f"존재하지 않는 스테이트 ID입니다: {sid}")
+            category = str(state_category or "").strip()
+            props = update_state_properties(
+                state.file_path,
+                manpower=int(manpower),
+                state_category=category,
+                resources=resources or {},
+                local_supplies=float(local_supplies),
+            )
+            return {
+                "ok": True,
+                "stateId": sid,
+                "manpower": props.manpower,
+                "stateCategory": props.state_category,
+                "resources": props.resources,
+                "localSupplies": props.local_supplies,
+            }
+        except (OSError, TypeError, ValueError) as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def get_state_history_editor(self, state_id: int) -> dict:
+        """Return editable state source and three closest pixel-adjacent examples."""
+        if self.provinces_arr is None:
+            return {"ok": False, "error": "맵을 먼저 로드해주세요."}
+        try:
+            sid = int(state_id)
+            target = next((item for item in self.states if item.id == sid), None)
+            if target is None:
+                raise ValueError(f"존재하지 않는 스테이트 ID입니다: {sid}")
+            connected_province_pairs: list[tuple[int, int]] = []
+            adjacency_path = self._adjacencies_csv_path()
+            if adjacency_path is not None:
+                try:
+                    connected_province_pairs = [
+                        (adjacency.from_id, adjacency.to_id)
+                        for adjacency in load_adjacencies(adjacency_path).items
+                        if adjacency.type != "impassable"
+                    ]
+                except OSError:
+                    connected_province_pairs = []
+            ranked = rank_adjacent_states(
+                self.provinces_arr,
+                self.provinces,
+                self.assignments,
+                sid,
+                connected_province_pairs=connected_province_pairs,
+                limit=3,
+            )
+            state_by_id = {item.id: item for item in self.states}
+            neighbours = []
+            for ranked_neighbour in ranked:
+                neighbour = state_by_id.get(ranked_neighbour.state_id)
+                if neighbour is None:
+                    continue
+                if ranked_neighbour.relation == "border":
+                    relation_detail = f"공유 경계 {ranked_neighbour.shared_edges}px"
+                elif ranked_neighbour.relation == "connection":
+                    relation_detail = (
+                        f"연결 인접 {ranked_neighbour.connection_count}개"
+                    )
+                else:
+                    relation_detail = (
+                        f"가까운 스테이트 · 중심 거리 "
+                        f"{round(ranked_neighbour.distance or 0)}px"
+                    )
+                neighbours.append({
+                    "id": neighbour.id,
+                    "name": neighbour.name,
+                    "fileName": os.path.basename(neighbour.file_path),
+                    "relation": ranked_neighbour.relation,
+                    "relationDetail": relation_detail,
+                    "source": read_state_source(neighbour.file_path),
+                    "history": read_state_history_block(neighbour.file_path),
+                })
+            return {
+                "ok": True,
+                "stateId": target.id,
+                "stateName": target.name,
+                "fileName": os.path.basename(target.file_path),
+                "source": read_state_source(target.file_path),
+                "neighbours": neighbours,
+            }
+        except (OSError, TypeError, ValueError) as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def update_state_source(self, state_id: int, source: str) -> dict:
+        """Replace one complete state file without changing the loaded map model."""
+        try:
+            sid = int(state_id)
+            target = next((item for item in self.states if item.id == sid), None)
+            if target is None:
+                raise ValueError(f"존재하지 않는 스테이트 ID입니다: {sid}")
+            saved = write_state_source(target.file_path, source)
+            return {"ok": True, "stateId": sid, "source": saved}
+        except (OSError, TypeError, ValueError) as exc:
+            return {"ok": False, "error": str(exc)}
+
     def assign_province_to_strategic_region(
         self, province_id: int, region_id: Optional[int]
     ) -> dict:
@@ -1674,15 +1956,6 @@ class Api:
 
             removed_ids = {p.id for p in removed}
 
-            # Validate every edited river before touching any on-disk map file.
-            # This avoids a partial save where provinces.bmp was already written
-            # before a malformed rivers.bmp was rejected.
-            if self.rivers_dirty:
-                topology = self.validate_river_topology()
-                if not topology.get("valid", False):
-                    raise ValueError(
-                        f"rivers.bmp 규칙 위반 {len(topology.get('issues', []))}건을 먼저 수정하세요."
-                    )
             if self.supply_dirty:
                 supply_validation = self.validate_supply_network()
                 if not supply_validation.get("valid", False):

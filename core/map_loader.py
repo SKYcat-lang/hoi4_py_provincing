@@ -388,6 +388,44 @@ def load_state_files(states_dir: str) -> list[StateInfo]:
     return states
 
 
+def load_state_category_names(state_category_dir: str) -> list[str]:
+    """Load state category IDs from ``common/state_category/*.txt``."""
+    return _load_common_definition_names(
+        state_category_dir, container_name="state_categories"
+    )
+
+
+def load_resource_names(resources_dir: str) -> list[str]:
+    """Load resource IDs from ``common/resources/*.txt``."""
+    return _load_common_definition_names(resources_dir, container_name="resources")
+
+
+def _load_common_definition_names(
+    definition_dir: str, *, container_name: str
+) -> list[str]:
+    """Read named blocks from a common definition directory.
+
+    Both the usual ``container = { id = { ... } }`` layout and direct
+    ``id = { ... }`` definitions are accepted because overhaul mods use both.
+    """
+    if not os.path.isdir(definition_dir):
+        return []
+    names: set[str] = set()
+    for filename in sorted(os.listdir(definition_dir)):
+        if not filename.endswith(".txt"):
+            continue
+        text = re.sub(
+            r"#.*", "", _read_text(os.path.join(definition_dir, filename))
+        )
+        for top_name, top_body in _iter_top_level_blocks(text):
+            if top_name == container_name:
+                for item_name, _ in _iter_top_level_blocks(top_body):
+                    names.add(item_name)
+            else:
+                names.add(top_name)
+    return sorted(names)
+
+
 def load_strategic_regions(regions_dir: str) -> list[StrategicRegionInfo]:
     """strategicregions/*.txt 가벼운 파싱."""
     if not os.path.isdir(regions_dir):

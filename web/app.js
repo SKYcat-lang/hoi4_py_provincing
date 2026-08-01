@@ -33,7 +33,7 @@ const state = {
   panX: 0,
   panY: 0,
   currentRgb: [255, 0, 0],
-  tool: 'brush',           // 'brush' | 'fill' | heightmap-only 'coast'
+  tool: 'brush',           // 'brush' | 'fill' | 'lasso' | heightmap-only 'coast'
   brushDown: false,
   rightDown: false,
   rightDragMoved: false,
@@ -54,11 +54,18 @@ const state = {
   lakeRgbSet: new Set(),
   seaRgbSet: new Set(),
   states: [],
+  stateCategoryNames: [],
+  resourceNames: [],
   stateById: new Map(),       // id -> {id, name, color}
   rgbToProvinceId: new Map(), // "r,g,b" -> province_id
   provinceRgbById: new Map(), // province_id -> [r,g,b]
   assignments: new Map(),     // province_id -> state_id
   selectedStateId: null,      // 현재 선택된 스테이트 ID
+  loadedStatePropertiesId: null,
+  statePropertiesBusy: false,
+  stateCreateBusy: false,
+  stateHistoryEditorId: null,
+  stateHistoryBusy: false,
   regions: [],
   regionById: new Map(),
   regionAssignments: new Map(),
@@ -117,6 +124,12 @@ const state = {
   provinceMoveSelectedPixels: new Uint32Array(0),
   provinceMoveBounds: null,
   provinceMoveDrag: null,
+  supportLassoMode: null,
+  supportLassoPoints: [],
+  supportLassoSelectedPixels: new Uint32Array(0),
+  supportLassoBounds: null,
+  supportLassoDrawing: false,
+  supportLassoDrag: null,
 };
 
 const canvas = $('#map-canvas');
@@ -152,10 +165,17 @@ provinceMoveHoleCtx.imageSmoothingEnabled = false;
 const provinceMoveCanvas = $('#province-move-canvas');
 const provinceMoveCtx = provinceMoveCanvas.getContext('2d');
 provinceMoveCtx.imageSmoothingEnabled = false;
+const supportLassoCanvas = $('#support-lasso-canvas');
+const supportLassoCtx = supportLassoCanvas.getContext('2d');
+supportLassoCtx.imageSmoothingEnabled = false;
 
 const provinceBorderCanvas = $('#province-border-canvas');
 let provinceBorderRenderer = null;
 let provinceBorderFrame = 0;
+const selectionGpuCanvas = $('#selection-gpu-canvas');
+let selectionOverlayRenderer = null;
+let selectionOverlayFrame = 0;
+let selectionOverlayMaskDirty = true;
 
 const referenceLayerHost = $('#reference-layer-host');
 
@@ -179,6 +199,35 @@ function updateZoomLabel() {
 function updateCurrentColorLabel() {
   $('#current-swatch').style.background = rgbToHex(state.currentRgb);
   $('#current-rgb').textContent = rgbToHex(state.currentRgb).toUpperCase();
+  const inputs = [
+    $('#province-color-r'), $('#province-color-g'), $('#province-color-b'),
+  ];
+  inputs.forEach((input, index) => {
+    if (input) input.value = String(state.currentRgb[index]);
+  });
+}
+
+function applyManualProvinceRgb() {
+  const inputs = [
+    $('#province-color-r'), $('#province-color-g'), $('#province-color-b'),
+  ];
+  const rgb = inputs.map(input => Number(input?.value));
+  if (rgb.some(value => !Number.isInteger(value) || value < 0 || value > 255)) {
+    setStatus('프로빈스 RGB는 각각 0~255의 정수로 입력하세요.');
+    return;
+  }
+  if (rgb[0] === 0 && rgb[1] === 0 && rgb[2] === 0) {
+    setStatus('RGB(0, 0, 0)은 프로빈스 공백용 무효 색이라 선택할 수 없습니다.');
+    return;
+  }
+  state.currentRgb = rgb;
+  updateCurrentColorLabel();
+  const provinceId = state.rgbToProvinceId?.get(rgbKey(rgb[0], rgb[1], rgb[2]));
+  setStatus(
+    provinceId === undefined
+      ? `수동 RGB 선택: ${rgbToHex(rgb).toUpperCase()} · 새 프로빈스 색`
+      : `수동 RGB 선택: ${rgbToHex(rgb).toUpperCase()} · 기존 프로빈스 ID ${provinceId} 색`,
+  );
 }
 function terrainPaletteEntry(index = state.currentTerrainIndex) {
   return state.terrainPalette.find(entry => entry.index === index) || null;
@@ -1070,6 +1119,7 @@ function applyTransform() {
   provinceMoveHoleCanvas.style.transformOrigin = '0 0';
   provinceMoveHoleCanvas.style.transform = t;
   applyProvinceMoveCanvasTransform();
+  applySupportLassoCanvasTransform();
   supplySvg.querySelectorAll('.supply-hub').forEach(circle => {
     circle.setAttribute('r', String(6 / state.zoom));
   });
@@ -1091,6 +1141,7 @@ function applyTransform() {
   referenceLayerHost.style.setProperty('--reference-border-width', `${1 / state.zoom}px`);
   updateZoomLabel();
   scheduleProvinceBorderRender();
+  scheduleSelectionOverlayRender();
   // SVG 마커는 transform과 별개로 화면 좌표로 다시 계산
   renderMarkers();
 }
@@ -1150,9 +1201,10 @@ function getHeightmapValue(x, y) {
 }
 
 function heightmapHueRgb(value) {
-  // Low=blue, high=red. Saturation/value stay at 100%, while only hue tracks
-  // the actual 8-bit height value.
-  const hue = (1 - value / 255) * 240;
+  // Keep the useful HOI4 terrain-height range in the full blue-to-red arc.
+  // Values outside the two anchors stay pinned to their endpoint colour.
+  const normalized = Math.max(0, Math.min(1, (value - 89) / (160 - 89)));
+  const hue = (1 - normalized) * 240;
   const sector = hue / 60;
   const x = Math.round(255 * (1 - Math.abs((sector % 2) - 1)));
   if (sector < 1) return [255, x, 0];
@@ -1897,6 +1949,300 @@ function renderProvinceBorders(renderer) {
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 }
 
+function initSelectionOverlayRenderer() {
+  if (selectionOverlayRenderer) return selectionOverlayRenderer;
+  const gl = selectionGpuCanvas?.getContext('webgl2', {
+    alpha: true,
+    antialias: true,
+    depth: false,
+    stencil: false,
+    premultipliedAlpha: true,
+    preserveDrawingBuffer: false,
+    powerPreference: 'high-performance',
+  });
+  if (!gl) {
+    selectionOverlayRenderer = {
+      available: false,
+      error: 'WebGL2 selection overlay is unavailable.',
+    };
+    return selectionOverlayRenderer;
+  }
+
+  const fullscreenVertex = `#version 300 es
+    precision highp float;
+    void main() {
+      vec2 position;
+      if (gl_VertexID == 0) position = vec2(-1.0, -1.0);
+      else if (gl_VertexID == 1) position = vec2(3.0, -1.0);
+      else position = vec2(-1.0, 3.0);
+      gl_Position = vec4(position, 0.0, 1.0);
+    }
+  `;
+  const hatchFragment = `#version 300 es
+    precision highp float;
+    precision highp int;
+    uniform sampler2D u_mask;
+    uniform ivec2 u_map_size;
+    uniform vec2 u_pan;
+    uniform vec2 u_selection_offset;
+    uniform float u_zoom;
+    uniform float u_device_scale;
+    uniform float u_framebuffer_height;
+    out vec4 out_color;
+
+    void main() {
+      vec2 screen = vec2(
+        gl_FragCoord.x,
+        u_framebuffer_height - gl_FragCoord.y
+      ) / u_device_scale;
+      vec2 map_point = (screen - u_pan) / u_zoom - u_selection_offset;
+      ivec2 cell = ivec2(floor(map_point));
+      if (cell.x < 0 || cell.y < 0 ||
+          cell.x >= u_map_size.x || cell.y >= u_map_size.y ||
+          texelFetch(u_mask, cell, 0).r < 0.5) {
+        discard;
+      }
+
+      float period = 10.0;
+      float phase = mod(screen.x + screen.y, period);
+      float distance_to_line = min(phase, period - phase);
+      float alpha = 0.92 * (1.0 - smoothstep(0.75, 1.5, distance_to_line));
+      if (alpha <= 0.001) discard;
+      out_color = vec4(vec3(alpha), alpha);
+    }
+  `;
+  const lineVertex = `#version 300 es
+    precision highp float;
+    layout(location = 0) in vec2 a_position;
+    uniform vec2 u_viewport;
+    void main() {
+      vec2 clip = vec2(
+        a_position.x / u_viewport.x * 2.0 - 1.0,
+        1.0 - a_position.y / u_viewport.y * 2.0
+      );
+      gl_Position = vec4(clip, 0.0, 1.0);
+    }
+  `;
+  const lineFragment = `#version 300 es
+    precision highp float;
+    uniform vec4 u_color;
+    out vec4 out_color;
+    void main() {
+      out_color = vec4(u_color.rgb * u_color.a, u_color.a);
+    }
+  `;
+
+  try {
+    selectionOverlayRenderer = {
+      available: true,
+      gl,
+      hatchProgram: createBorderProgram(gl, fullscreenVertex, hatchFragment),
+      lineProgram: createBorderProgram(gl, lineVertex, lineFragment),
+      maskTexture: gl.createTexture(),
+      vertexArray: gl.createVertexArray(),
+      lineVertexArray: gl.createVertexArray(),
+      lineBuffer: gl.createBuffer(),
+      width: 0,
+      height: 0,
+      maskReady: false,
+    };
+  } catch (error) {
+    console.error('selection overlay WebGL initialization failed', error);
+    selectionOverlayRenderer = { available: false, error: String(error) };
+  }
+  return selectionOverlayRenderer;
+}
+
+function ensureSelectionOverlayTexture(renderer) {
+  if (renderer.width === state.width && renderer.height === state.height) return;
+  const { gl } = renderer;
+  if (state.width > gl.getParameter(gl.MAX_TEXTURE_SIZE) ||
+      state.height > gl.getParameter(gl.MAX_TEXTURE_SIZE)) {
+    throw new Error('Map exceeds the GPU selection texture limit.');
+  }
+  renderer.width = state.width;
+  renderer.height = state.height;
+  renderer.maskReady = false;
+  selectionOverlayMaskDirty = true;
+  gl.bindTexture(gl.TEXTURE_2D, renderer.maskTexture);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+  gl.texImage2D(
+    gl.TEXTURE_2D, 0, gl.R8, state.width, state.height, 0,
+    gl.RED, gl.UNSIGNED_BYTE, null,
+  );
+}
+
+function uploadSelectionOverlayMask(renderer) {
+  ensureSelectionOverlayTexture(renderer);
+  if (!selectionOverlayMaskDirty && renderer.maskReady) return;
+  const mask = new Uint8Array(state.width * state.height);
+  for (const pixel of state.provinceMoveSelectedPixels) mask[pixel] = 255;
+  const { gl } = renderer;
+  gl.bindTexture(gl.TEXTURE_2D, renderer.maskTexture);
+  gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+  gl.texSubImage2D(
+    gl.TEXTURE_2D, 0, 0, 0, state.width, state.height,
+    gl.RED, gl.UNSIGNED_BYTE, mask,
+  );
+  renderer.maskReady = true;
+  selectionOverlayMaskDirty = false;
+}
+
+function selectionLineVertices(points, closed, width, deviceScale, offsetX, offsetY) {
+  const vertices = [];
+  const segmentCount = closed ? points.length : points.length - 1;
+  for (let index = 0; index < segmentCount; index++) {
+    const first = points[index];
+    const second = points[(index + 1) % points.length];
+    const ax = (state.panX + (first[0] + offsetX) * state.zoom) * deviceScale;
+    const ay = (state.panY + (first[1] + offsetY) * state.zoom) * deviceScale;
+    const bx = (state.panX + (second[0] + offsetX) * state.zoom) * deviceScale;
+    const by = (state.panY + (second[1] + offsetY) * state.zoom) * deviceScale;
+    const length = Math.hypot(bx - ax, by - ay);
+    if (length < 0.001) continue;
+    const nx = -(by - ay) / length * width * deviceScale * 0.5;
+    const ny = (bx - ax) / length * width * deviceScale * 0.5;
+    vertices.push(
+      ax + nx, ay + ny, ax - nx, ay - ny, bx + nx, by + ny,
+      bx + nx, by + ny, ax - nx, ay - ny, bx - nx, by - ny,
+    );
+  }
+  return new Float32Array(vertices);
+}
+
+function drawSelectionLasso(renderer, bufferWidth, bufferHeight, deviceScale) {
+  const points = state.supportLassoPoints;
+  if (state.tool !== 'lasso' ||
+      !['terrain', 'heightmap', 'rivers'].includes(state.mode) ||
+      state.supportLassoMode !== state.mode || points.length < 2) return;
+  const drag = state.supportLassoDrag;
+  const offsetX = drag?.dx || 0;
+  const offsetY = drag?.dy || 0;
+  const closed = !state.supportLassoDrawing && points.length > 2;
+  const { gl } = renderer;
+  gl.useProgram(renderer.lineProgram);
+  gl.bindVertexArray(renderer.lineVertexArray);
+  gl.bindBuffer(gl.ARRAY_BUFFER, renderer.lineBuffer);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  gl.uniform2f(
+    gl.getUniformLocation(renderer.lineProgram, 'u_viewport'),
+    bufferWidth,
+    bufferHeight,
+  );
+  for (const [width, color] of [
+    [3.5, [0, 0, 0, 0.82]],
+    [1.5, [1, 1, 1, 1]],
+  ]) {
+    const vertices = selectionLineVertices(
+      points, closed, width, deviceScale, offsetX, offsetY,
+    );
+    if (!vertices.length) continue;
+    gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.DYNAMIC_DRAW);
+    gl.uniform4f(
+      gl.getUniformLocation(renderer.lineProgram, 'u_color'),
+      color[0], color[1], color[2], color[3],
+    );
+    gl.drawArrays(gl.TRIANGLES, 0, vertices.length / 2);
+  }
+}
+
+function renderSelectionOverlay() {
+  const hatchVisible = state.loaded && state.mode === 'move' &&
+    state.provinceMoveSelectedPixels.length > 0;
+  const lassoVisible = state.loaded && state.tool === 'lasso' &&
+    ['terrain', 'heightmap', 'rivers'].includes(state.mode) &&
+    state.supportLassoMode === state.mode && state.supportLassoPoints.length > 1;
+  const visible = hatchVisible || lassoVisible;
+  selectionGpuCanvas.style.display = visible ? 'block' : 'none';
+  if (!visible) return;
+
+  const renderer = initSelectionOverlayRenderer();
+  if (!renderer.available) {
+    selectionGpuCanvas.style.display = 'none';
+    console.warn(`GPU selection overlay unavailable: ${renderer.error}`);
+    return;
+  }
+  const { gl } = renderer;
+  try {
+  const deviceScale = Math.max(1, window.devicePixelRatio || 1);
+  const cssWidth = Math.max(1, selectionGpuCanvas.clientWidth);
+  const cssHeight = Math.max(1, selectionGpuCanvas.clientHeight);
+  const bufferWidth = Math.max(1, Math.round(cssWidth * deviceScale));
+  const bufferHeight = Math.max(1, Math.round(cssHeight * deviceScale));
+  if (selectionGpuCanvas.width !== bufferWidth ||
+      selectionGpuCanvas.height !== bufferHeight) {
+    selectionGpuCanvas.width = bufferWidth;
+    selectionGpuCanvas.height = bufferHeight;
+  }
+
+  gl.viewport(0, 0, bufferWidth, bufferHeight);
+  gl.clearColor(0, 0, 0, 0);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+
+  if (hatchVisible) {
+    uploadSelectionOverlayMask(renderer);
+    gl.useProgram(renderer.hatchProgram);
+    gl.bindVertexArray(renderer.vertexArray);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, renderer.maskTexture);
+    gl.uniform1i(gl.getUniformLocation(renderer.hatchProgram, 'u_mask'), 0);
+    gl.uniform2i(
+      gl.getUniformLocation(renderer.hatchProgram, 'u_map_size'),
+      state.width,
+      state.height,
+    );
+    gl.uniform2f(
+      gl.getUniformLocation(renderer.hatchProgram, 'u_pan'),
+      state.panX,
+      state.panY,
+    );
+    gl.uniform1f(
+      gl.getUniformLocation(renderer.hatchProgram, 'u_zoom'),
+      state.zoom,
+    );
+    gl.uniform1f(
+      gl.getUniformLocation(renderer.hatchProgram, 'u_device_scale'),
+      deviceScale,
+    );
+    gl.uniform1f(
+      gl.getUniformLocation(renderer.hatchProgram, 'u_framebuffer_height'),
+      bufferHeight,
+    );
+    const drag = state.provinceMoveDrag;
+    gl.uniform2f(
+      gl.getUniformLocation(renderer.hatchProgram, 'u_selection_offset'),
+      drag?.dx || 0,
+      drag?.dy || 0,
+    );
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+  drawSelectionLasso(renderer, bufferWidth, bufferHeight, deviceScale);
+  } catch (error) {
+    console.error('selection overlay render failed', error);
+    selectionGpuCanvas.style.display = 'none';
+  }
+}
+
+function scheduleSelectionOverlayRender() {
+  if (selectionOverlayFrame) return;
+  selectionOverlayFrame = window.requestAnimationFrame(() => {
+    selectionOverlayFrame = 0;
+    renderSelectionOverlay();
+  });
+}
+
+function markSelectionOverlayMaskDirty() {
+  selectionOverlayMaskDirty = true;
+  scheduleSelectionOverlayRender();
+}
+
 function addProvinceBorderDirtyBounds(points) {
   if (!points || points.length === 0 || points.length > 500000) {
     state.provinceBorderDirtyBounds = null;
@@ -2271,17 +2617,20 @@ function updateReferenceTransform(clientX, clientY) {
 function syncPaintToolButtons() {
   $('#btn-tool-brush').classList.toggle('active', state.tool === 'brush');
   $('#btn-tool-fill').classList.toggle('active', state.tool === 'fill');
+  $('#btn-tool-lasso').classList.toggle('active', state.tool === 'lasso');
   const coastButton = $('#btn-height-coast-smooth');
   if (coastButton) coastButton.classList.toggle('active', state.tool === 'coast');
 }
 
 function setTool(name) {
-  if (!['brush', 'fill', 'coast'].includes(name)) return;
+  if (!['brush', 'fill', 'lasso', 'coast'].includes(name)) return;
   if (name === 'coast' && state.mode !== 'heightmap') return;
+  if (name === 'lasso' && !['terrain', 'heightmap', 'rivers'].includes(state.mode)) return;
+  if (name !== 'lasso') clearSupportLasso();
   state.tool = name;
   syncPaintToolButtons();
   canvas.style.cursor = name === 'fill'
-    ? 'cell' : (name === 'coast' ? 'pointer' : 'crosshair');
+    ? 'cell' : (name === 'coast' ? 'pointer' : (name === 'lasso' ? 'crosshair' : 'crosshair'));
   if (name !== 'brush') {
     const preview = $('#support-brush-preview');
     if (preview) preview.style.display = 'none';
@@ -2292,7 +2641,9 @@ function setTool(name) {
     rivers: '강 ',
   }[state.mode] || '';
   if (name === 'coast') {
-    setStatus('높이맵 도구: 해안 다듬기 · 바다 프로빈스를 클릭하세요.');
+    setStatus('높이맵 도구: 수변 다듬기 · 바다 또는 호수 프로빈스를 클릭하세요.');
+  } else if (name === 'lasso') {
+    setStatus(`${target}도구: 올가미 (L) · 드래그로 선택한 뒤 내부를 드래그해 이동`);
   } else {
     setStatus(name === 'fill' ? `${target}도구: 페인트통 (G)` : `${target}도구: 브러시 (B)`);
   }
@@ -2344,6 +2695,7 @@ function applyProvinceMoveCanvasTransform() {
   provinceMoveCanvas.style.transformOrigin = '0 0';
   provinceMoveCanvas.style.transform =
     `translate(${state.panX + dx * state.zoom}px, ${state.panY + dy * state.zoom}px) scale(${state.zoom})`;
+  scheduleSelectionOverlayRender();
 }
 
 function updateProvinceMoveReadout() {
@@ -2378,6 +2730,7 @@ function renderProvinceMoveSelection() {
     state.provinceMoveSelectedPixels = new Uint32Array(0);
     state.provinceMoveBounds = null;
     updateProvinceMoveReadout();
+    markSelectionOverlayMaskDirty();
     return;
   }
 
@@ -2406,13 +2759,11 @@ function renderProvinceMoveSelection() {
     state.provinceMoveSelectedPixels = new Uint32Array(0);
     state.provinceMoveBounds = null;
     updateProvinceMoveReadout();
+    markSelectionOverlayMaskDirty();
     return;
   }
 
   const selectedPixels = new Uint32Array(count);
-  const cropWidth = maxX - minX + 1;
-  const cropHeight = maxY - minY + 1;
-  const highlight = provinceMoveCtx.createImageData(cropWidth, cropHeight);
   let selectedIndex = 0;
   for (let pixel = 0, offset = 0; pixel < state.width * state.height; pixel++, offset += 4) {
     const packed = (
@@ -2422,18 +2773,11 @@ function renderProvinceMoveSelection() {
     );
     if (!colors.has(packed)) continue;
     selectedPixels[selectedIndex++] = pixel;
-    const x = pixel % state.width;
-    const y = Math.floor(pixel / state.width);
-    const cropOffset = ((y - minY) * cropWidth + x - minX) * 4;
-    highlight.data[cropOffset] = 255;
-    highlight.data[cropOffset + 1] = 202;
-    highlight.data[cropOffset + 2] = 40;
-    highlight.data[cropOffset + 3] = 150;
   }
   state.provinceMoveSelectedPixels = selectedPixels;
   state.provinceMoveBounds = { minX, minY, maxX, maxY };
-  provinceMoveCtx.putImageData(highlight, minX, minY);
   updateProvinceMoveReadout();
+  markSelectionOverlayMaskDirty();
 }
 
 function renderProvinceMoveDragPreview() {
@@ -2458,12 +2802,299 @@ function renderProvinceMoveDragPreview() {
   provinceMoveCtx.putImageData(moved, bounds.minX, bounds.minY);
   provinceMoveHoleCtx.putImageData(holes, bounds.minX, bounds.minY);
   applyProvinceMoveCanvasTransform();
+  scheduleSelectionOverlayRender();
 }
 
 function clearProvinceMoveSelection() {
   state.provinceMoveSelectedIds.clear();
   renderProvinceMoveSelection();
   setStatus('프로빈스 이동: 선택을 모두 해제했습니다.');
+}
+
+function supportLassoModeLabel(mode) {
+  return { terrain: '지형', heightmap: '높이맵', rivers: '강' }[mode] || '지원 맵';
+}
+
+function applySupportLassoCanvasTransform() {
+  if (!supportLassoCanvas) return;
+  const drag = state.supportLassoDrag;
+  const dx = drag ? drag.dx : 0;
+  const dy = drag ? drag.dy : 0;
+  supportLassoCanvas.style.transformOrigin = '0 0';
+  supportLassoCanvas.style.transform =
+    `translate(${state.panX + dx * state.zoom}px, ${state.panY + dy * state.zoom}px) scale(${state.zoom})`;
+  supportLassoCanvas.style.opacity = (
+    state.tool === 'lasso' &&
+    ['terrain', 'heightmap', 'rivers'].includes(state.mode) &&
+    state.supportLassoMode === state.mode
+  ) ? '1' : '0';
+  scheduleSelectionOverlayRender();
+}
+
+function clearSupportLasso(announce = false) {
+  state.supportLassoMode = null;
+  state.supportLassoPoints = [];
+  state.supportLassoSelectedPixels = new Uint32Array(0);
+  state.supportLassoBounds = null;
+  state.supportLassoDrawing = false;
+  state.supportLassoDrag = null;
+  supportLassoCtx.clearRect(0, 0, supportLassoCanvas.width, supportLassoCanvas.height);
+  applySupportLassoCanvasTransform();
+  scheduleSelectionOverlayRender();
+  if (announce) setStatus('올가미 선택 해제');
+}
+
+function renderSupportLassoOverlay() {
+  supportLassoCtx.clearRect(0, 0, supportLassoCanvas.width, supportLassoCanvas.height);
+  const points = state.supportLassoPoints;
+  if (!points.length || state.supportLassoMode !== state.mode) {
+    applySupportLassoCanvasTransform();
+    return;
+  }
+
+  const bounds = state.supportLassoBounds;
+  const selectedPixels = state.supportLassoSelectedPixels;
+  if (state.supportLassoDrag && bounds && selectedPixels.length) {
+    const cropWidth = bounds.maxX - bounds.minX + 1;
+    const cropHeight = bounds.maxY - bounds.minY + 1;
+    const preview = supportLassoCtx.createImageData(cropWidth, cropHeight);
+    const source = state.supportLassoMode === 'terrain'
+      ? state.terrainPixelBuf
+      : (state.supportLassoMode === 'heightmap'
+        ? state.heightmapPixelBuf
+        : state.riversFullPixelBuf);
+    if (!source) {
+      applySupportLassoCanvasTransform();
+      return;
+    }
+    for (const pixel of selectedPixels) {
+      const x = pixel % state.width;
+      const y = Math.floor(pixel / state.width);
+      const sourceOffset = pixel * 4;
+      const cropOffset = ((y - bounds.minY) * cropWidth + x - bounds.minX) * 4;
+      preview.data[cropOffset] = source[sourceOffset];
+      preview.data[cropOffset + 1] = source[sourceOffset + 1];
+      preview.data[cropOffset + 2] = source[sourceOffset + 2];
+      preview.data[cropOffset + 3] = 255;
+    }
+    supportLassoCtx.putImageData(preview, bounds.minX, bounds.minY);
+  }
+
+  applySupportLassoCanvasTransform();
+  scheduleSelectionOverlayRender();
+}
+
+function beginSupportLassoDrawing(x, y) {
+  clearSupportLasso();
+  const pointX = Math.max(0.5, Math.min(state.width - 0.5, x + 0.5));
+  const pointY = Math.max(0.5, Math.min(state.height - 0.5, y + 0.5));
+  state.supportLassoMode = state.mode;
+  state.supportLassoPoints = [[pointX, pointY]];
+  state.supportLassoDrawing = true;
+  renderSupportLassoOverlay();
+  canvas.style.cursor = 'crosshair';
+}
+
+function appendSupportLassoPoint(x, y) {
+  if (!state.supportLassoDrawing) return;
+  const pointX = Math.max(0.5, Math.min(state.width - 0.5, x + 0.5));
+  const pointY = Math.max(0.5, Math.min(state.height - 0.5, y + 0.5));
+  const previous = state.supportLassoPoints[state.supportLassoPoints.length - 1];
+  if (previous && Math.hypot(pointX - previous[0], pointY - previous[1]) < 1) return;
+  state.supportLassoPoints.push([pointX, pointY]);
+  renderSupportLassoOverlay();
+}
+
+function rasterizeSupportLasso(points) {
+  if (points.length < 3) return { pixels: new Uint32Array(0), bounds: null };
+  let polygonMinY = state.height;
+  let polygonMaxY = 0;
+  for (const point of points) {
+    polygonMinY = Math.min(polygonMinY, point[1]);
+    polygonMaxY = Math.max(polygonMaxY, point[1]);
+  }
+  const minY = Math.max(0, Math.floor(polygonMinY));
+  const maxY = Math.min(state.height - 1, Math.ceil(polygonMaxY));
+  const pixels = [];
+  let minX = state.width;
+  let selectedMinY = state.height;
+  let maxX = -1;
+  let selectedMaxY = -1;
+  for (let y = minY; y <= maxY; y++) {
+    const scanY = y + 0.5;
+    const intersections = [];
+    for (let index = 0, previousIndex = points.length - 1;
+         index < points.length; previousIndex = index++) {
+      const first = points[previousIndex];
+      const second = points[index];
+      if ((first[1] > scanY) === (second[1] > scanY)) continue;
+      intersections.push(
+        first[0] + (scanY - first[1]) *
+        (second[0] - first[0]) / (second[1] - first[1]),
+      );
+    }
+    intersections.sort((first, second) => first - second);
+    for (let index = 0; index + 1 < intersections.length; index += 2) {
+      const startX = Math.max(0, Math.ceil(intersections[index] - 0.5));
+      const endX = Math.min(
+        state.width - 1, Math.floor(intersections[index + 1] - 0.5),
+      );
+      for (let x = startX; x <= endX; x++) pixels.push(y * state.width + x);
+      if (startX <= endX) {
+        minX = Math.min(minX, startX);
+        maxX = Math.max(maxX, endX);
+        selectedMinY = Math.min(selectedMinY, y);
+        selectedMaxY = Math.max(selectedMaxY, y);
+      }
+    }
+  }
+  return {
+    pixels: Uint32Array.from(pixels),
+    bounds: pixels.length
+      ? { minX, minY: selectedMinY, maxX, maxY: selectedMaxY }
+      : null,
+  };
+}
+
+function finishSupportLassoDrawing() {
+  if (!state.supportLassoDrawing) return;
+  state.supportLassoDrawing = false;
+  const selection = rasterizeSupportLasso(state.supportLassoPoints);
+  state.supportLassoSelectedPixels = selection.pixels;
+  state.supportLassoBounds = selection.bounds;
+  if (!selection.pixels.length) {
+    clearSupportLasso();
+    setStatus('올가미 선택 영역이 너무 작습니다.');
+    return;
+  }
+  renderSupportLassoOverlay();
+  canvas.style.cursor = 'grab';
+  setStatus(
+    `${supportLassoModeLabel(state.mode)} 올가미: ` +
+    `${selection.pixels.length.toLocaleString()}픽셀 선택 · 내부를 드래그해 이동`,
+  );
+}
+
+function supportLassoContainsPixel(x, y) {
+  const target = y * state.width + x;
+  const pixels = state.supportLassoSelectedPixels;
+  let low = 0;
+  let high = pixels.length - 1;
+  while (low <= high) {
+    const middle = (low + high) >> 1;
+    const value = pixels[middle];
+    if (value === target) return true;
+    if (value < target) low = middle + 1;
+    else high = middle - 1;
+  }
+  return false;
+}
+
+function beginSupportLassoDrag(x, y) {
+  if (!state.supportLassoBounds || !supportLassoContainsPixel(x, y)) return false;
+  state.supportLassoDrag = { startX: x, startY: y, dx: 0, dy: 0 };
+  canvas.style.cursor = 'grabbing';
+  renderSupportLassoOverlay();
+  return true;
+}
+
+function updateSupportLassoDrag(x, y) {
+  const drag = state.supportLassoDrag;
+  const bounds = state.supportLassoBounds;
+  if (!drag || !bounds) return;
+  drag.dx = Math.max(
+    -bounds.minX,
+    Math.min(state.width - 1 - bounds.maxX, x - drag.startX),
+  );
+  drag.dy = Math.max(
+    -bounds.minY,
+    Math.min(state.height - 1 - bounds.maxY, y - drag.startY),
+  );
+  applySupportLassoCanvasTransform();
+  scheduleSelectionOverlayRender();
+  setStatus(
+    `${supportLassoModeLabel(state.supportLassoMode)} 올가미 이동 ` +
+    `(${drag.dx}, ${drag.dy})`,
+  );
+}
+
+async function finishSupportLassoDrag() {
+  const drag = state.supportLassoDrag;
+  const mode = state.supportLassoMode;
+  const bounds = state.supportLassoBounds;
+  state.supportLassoDrag = null;
+  applySupportLassoCanvasTransform();
+  if (!drag || !bounds || (!drag.dx && !drag.dy)) {
+    renderSupportLassoOverlay();
+    canvas.style.cursor = 'grab';
+    return;
+  }
+
+  const sourcePixels = state.supportLassoSelectedPixels;
+  state.historyBusy = true;
+  updateUndoButtons();
+  let result;
+  try {
+    if (mode === 'terrain') {
+      result = await window.pywebview.api.move_terrain_selection(
+        Array.from(sourcePixels), drag.dx, drag.dy,
+      );
+    } else if (mode === 'heightmap') {
+      result = await window.pywebview.api.move_heightmap_selection(
+        Array.from(sourcePixels), drag.dx, drag.dy,
+      );
+    } else {
+      result = await window.pywebview.api.move_rivers_selection(
+        Array.from(sourcePixels), drag.dx, drag.dy,
+      );
+    }
+  } catch (error) {
+    result = { ok: false, error: String(error) };
+  }
+  if (!result || !result.ok) {
+    state.historyBusy = false;
+    updateUndoButtons();
+    renderSupportLassoOverlay();
+    canvas.style.cursor = 'grab';
+    setStatus(`올가미 이동 실패: ${result?.error || 'unknown'}`);
+    return;
+  }
+
+  const changedPixels = result.changedPixels || [];
+  const oldChanges = changedPixels.map(
+    ([x, y, oldValue]) => [x, y, oldValue],
+  );
+  for (const [x, y, , newValue] of changedPixels) {
+    if (mode === 'terrain') setTerrainPixelRaw(x, y, newValue);
+    else if (mode === 'heightmap') setHeightmapPixelRaw(x, y, newValue);
+    else setRiverPixelRaw(x, y, newValue);
+  }
+  if (mode === 'terrain') flushTerrainCanvas();
+  else if (mode === 'heightmap') flushHeightmapCanvas();
+  else flushRiversCanvas();
+  if (oldChanges.length) {
+    state.undoStack.push({ kind: mode, changes: oldChanges });
+    state.redoStack = [];
+  }
+  state.supportLassoSelectedPixels = Uint32Array.from(result.selectedPixels || []);
+  state.supportLassoPoints = state.supportLassoPoints.map(
+    point => [point[0] + drag.dx, point[1] + drag.dy],
+  );
+  state.supportLassoBounds = {
+    minX: bounds.minX + drag.dx,
+    minY: bounds.minY + drag.dy,
+    maxX: bounds.maxX + drag.dx,
+    maxY: bounds.maxY + drag.dy,
+  };
+  if (mode === 'heightmap') markWorldNormalStale();
+  state.historyBusy = false;
+  updateUndoButtons();
+  renderSupportLassoOverlay();
+  canvas.style.cursor = 'grab';
+  setStatus(
+    `${supportLassoModeLabel(mode)} 올가미 이동 완료 · ` +
+    `(${drag.dx}, ${drag.dy}) · ${changedPixels.length.toLocaleString()}픽셀 변경`,
+  );
 }
 
 // ---------- 탭/모드 전환 ----------
@@ -2485,7 +3116,11 @@ function setMode(name) {
     setStatus('supply_nodes.txt와 railways.txt가 모두 필요합니다.');
     return;
   }
+  if (name !== state.mode) clearSupportLasso();
   if (name !== 'heightmap' && state.tool === 'coast') state.tool = 'brush';
+  if (!['terrain', 'heightmap', 'rivers'].includes(name) && state.tool === 'lasso') {
+    state.tool = 'brush';
+  }
   state.mode = name;
   syncPaintToolButtons();
   $('#tab-province').classList.toggle('active', name === 'province');
@@ -2520,6 +3155,9 @@ function setMode(name) {
   document.querySelectorAll('.heightmap-only').forEach(el => {
     el.hidden = (name !== 'heightmap');
   });
+  document.querySelectorAll('.support-lasso-only').forEach(el => {
+    el.hidden = !['terrain', 'heightmap', 'rivers'].includes(name);
+  });
   document.querySelectorAll('.rivers-only').forEach(el => {
     el.hidden = (name !== 'rivers');
   });
@@ -2546,6 +3184,7 @@ function setMode(name) {
   const terrainPaletteBar = document.getElementById('terrain-palette-bar');
   const supplyEditorBar = document.getElementById('supply-editor-bar');
   const provinceMoveBar = document.getElementById('province-move-bar');
+  const stateEditorBar = document.getElementById('state-editor-bar');
   if (adjBar) {
     adjBar.classList.toggle('hidden', name !== 'adjacency');
     adjBar.setAttribute('aria-hidden', name !== 'adjacency' ? 'true' : 'false');
@@ -2565,6 +3204,10 @@ function setMode(name) {
     provinceMoveBar.classList.toggle('hidden', name !== 'move');
     provinceMoveBar.setAttribute('aria-hidden', name !== 'move' ? 'true' : 'false');
   }
+  if (stateEditorBar) {
+    stateEditorBar.classList.toggle('hidden', name !== 'state');
+    stateEditorBar.setAttribute('aria-hidden', name !== 'state' ? 'true' : 'false');
+  }
   // 인접 모드 진입 시 영구 선/목록 자동 로드
   if (name === 'adjacency' && window.AdjMode && typeof window.AdjMode.enter === 'function') {
     window.AdjMode.enter();
@@ -2580,6 +3223,7 @@ function setMode(name) {
       ctx.putImageData(state.stateImageData, 0, 0);
       canvas.style.cursor = 'pointer';
       updateSelectedStateLabel();
+      loadSelectedStateProperties();
     } else if (name === 'region') {
       ensureRegionImageData();
       ctx.putImageData(state.regionImageData, 0, 0);
@@ -2598,7 +3242,8 @@ function setMode(name) {
       canvas.style.cursor = 'crosshair';
     } else if (name === 'terrain') {
       ctx.putImageData(state.imageData, 0, 0);
-      canvas.style.cursor = state.tool === 'fill' ? 'cell' : 'crosshair';
+      canvas.style.cursor = state.tool === 'fill'
+        ? 'cell' : (state.tool === 'lasso' ? 'crosshair' : 'crosshair');
       updateTerrainPaletteLabel();
     } else if (name === 'heightmap') {
       ctx.putImageData(state.imageData, 0, 0);
@@ -2627,6 +3272,7 @@ function setMode(name) {
   for (const layer of state.referenceLayers) updateReferenceLayerElement(layer);
   refreshTerrainLayerVisibility();
   refreshSupportEditorLayers();
+  applySupportLassoCanvasTransform();
   const moveVisible = name === 'move';
   provinceMoveCanvas.style.opacity = moveVisible ? '1' : '0';
   provinceMoveHoleCanvas.style.opacity = moveVisible ? '1' : '0';
@@ -2634,6 +3280,7 @@ function setMode(name) {
     state.provinceMoveDrag = null;
     applyProvinceMoveCanvasTransform();
   }
+  scheduleSelectionOverlayRender();
   protectCanvas.style.display = ['move', 'terrain', 'rivers', 'supply'].includes(name) ? 'none' : 'block';
   const labels = {
     province: '프로빈스 편집',
@@ -3159,6 +3806,274 @@ function updateSelectedStateLabel() {
   label.textContent = `${s.name} (id ${sid}, ${count}개 프로빈스)`;
 }
 
+const BASE_STATE_RESOURCES = [
+  'oil', 'aluminium', 'rubber', 'tungsten', 'steel', 'chromium',
+];
+
+function setStatePropertiesEnabled(enabled) {
+  for (const selector of [
+    '#state-manpower', '#state-category', '#state-local-supplies',
+    '#btn-state-properties-save', '#btn-state-history-open',
+  ]) {
+    const element = $(selector);
+    if (element) element.disabled = !enabled;
+  }
+  document.querySelectorAll('#state-resource-grid input').forEach(input => {
+    input.disabled = !enabled;
+  });
+}
+
+function renderStateResourceFields(resources = {}) {
+  const grid = $('#state-resource-grid');
+  if (!grid) return;
+  grid.innerHTML = '';
+  const names = Array.from(new Set([
+    ...(state.resourceNames.length ? state.resourceNames : BASE_STATE_RESOURCES),
+    ...Object.keys(resources || {}),
+  ])).sort((a, b) => {
+    const ai = BASE_STATE_RESOURCES.indexOf(a);
+    const bi = BASE_STATE_RESOURCES.indexOf(b);
+    if (ai >= 0 || bi >= 0) return (ai < 0 ? 999 : ai) - (bi < 0 ? 999 : bi);
+    return a.localeCompare(b);
+  });
+  for (const name of names) {
+    const label = document.createElement('label');
+    label.className = 'state-resource-field';
+    const caption = document.createElement('span');
+    caption.textContent = name;
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.min = '0';
+    input.step = '1';
+    input.value = String(Number(resources[name]) || 0);
+    input.dataset.resource = name;
+    label.append(caption, input);
+    grid.appendChild(label);
+  }
+}
+
+function renderStateCategoryOptions(currentCategory = '') {
+  const select = $('#state-category');
+  if (!select) return;
+  const names = Array.from(new Set([
+    ...(state.stateCategoryNames || []),
+    ...(currentCategory ? [currentCategory] : []),
+  ])).sort();
+  select.innerHTML = '';
+  for (const name of names) {
+    const option = document.createElement('option');
+    option.value = name;
+    option.textContent = name;
+    select.appendChild(option);
+  }
+  select.value = currentCategory;
+}
+
+function clearStatePropertiesEditor(message = '캔버스에서 스테이트를 선택하세요.') {
+  state.loadedStatePropertiesId = null;
+  const selection = $('#state-editor-selection');
+  if (selection) selection.textContent = message;
+  const manpower = $('#state-manpower');
+  const localSupplies = $('#state-local-supplies');
+  if (manpower) manpower.value = '';
+  if (localSupplies) localSupplies.value = '';
+  renderStateCategoryOptions('');
+  renderStateResourceFields({});
+  setStatePropertiesEnabled(false);
+}
+
+async function loadSelectedStateProperties() {
+  if (!state.loaded || state.mode !== 'state' || state.selectedStateId === null) {
+    clearStatePropertiesEditor();
+    return;
+  }
+  const requestedId = state.selectedStateId;
+  const selected = state.stateById.get(requestedId);
+  $('#state-editor-selection').textContent = `${selected ? selected.name : '스테이트'} (ID ${requestedId}) · 불러오는 중…`;
+  setStatePropertiesEnabled(false);
+  let result;
+  try {
+    result = await window.pywebview.api.get_state_properties(requestedId);
+  } catch (error) {
+    if (state.mode === 'state' && state.selectedStateId === requestedId) {
+      clearStatePropertiesEditor(`ID ${requestedId} 속성 로드 실패`);
+      setStatus(`스테이트 속성 로드 실패: ${error && error.message ? error.message : error}`);
+    }
+    return;
+  }
+  if (state.mode !== 'state' || state.selectedStateId !== requestedId) return;
+  if (!result || !result.ok) {
+    clearStatePropertiesEditor(`ID ${requestedId} 속성 로드 실패`);
+    setStatus(`스테이트 속성 로드 실패: ${result ? result.error : 'unknown'}`);
+    return;
+  }
+  state.loadedStatePropertiesId = requestedId;
+  $('#state-editor-selection').textContent = `${selected ? selected.name : '스테이트'} (ID ${requestedId})`;
+  $('#state-manpower').value = String(result.manpower ?? 0);
+  $('#state-local-supplies').value = String(result.localSupplies ?? 0);
+  renderStateCategoryOptions(result.stateCategory || '');
+  renderStateResourceFields(result.resources || {});
+  setStatePropertiesEnabled(true);
+}
+
+async function saveSelectedStateProperties() {
+  const stateId = state.loadedStatePropertiesId;
+  if (stateId === null || stateId !== state.selectedStateId || state.statePropertiesBusy) return;
+  const resources = {};
+  document.querySelectorAll('#state-resource-grid input[data-resource]').forEach(input => {
+    resources[input.dataset.resource] = Math.max(0, parseInt(input.value, 10) || 0);
+  });
+  state.statePropertiesBusy = true;
+  setStatePropertiesEnabled(false);
+  setStatus(`스테이트 ${stateId} 속성 저장 중…`);
+  try {
+    const result = await window.pywebview.api.update_state_properties(
+      stateId,
+      Math.max(0, parseInt($('#state-manpower').value, 10) || 0),
+      $('#state-category').value,
+      resources,
+      Math.max(0, Number($('#state-local-supplies').value) || 0),
+    );
+    if (!result || !result.ok) {
+      setStatus(`스테이트 속성 저장 실패: ${result ? result.error : 'unknown'}`);
+      return;
+    }
+    setStatus(`스테이트 ${stateId} 속성 저장 완료 · history 블록은 그대로 보존됨`);
+    renderStateResourceFields(result.resources || {});
+  } catch (error) {
+    setStatus(`스테이트 속성 저장 실패: ${error && error.message ? error.message : error}`);
+  } finally {
+    state.statePropertiesBusy = false;
+    if (state.loadedStatePropertiesId === stateId) setStatePropertiesEnabled(true);
+  }
+}
+
+async function copyTextToClipboard(value) {
+  const textValue = String(value || '');
+  try {
+    await navigator.clipboard.writeText(textValue);
+  } catch (_) {
+    const temporary = document.createElement('textarea');
+    temporary.value = textValue;
+    temporary.style.position = 'fixed';
+    temporary.style.opacity = '0';
+    document.body.appendChild(temporary);
+    temporary.select();
+    document.execCommand('copy');
+    temporary.remove();
+  }
+}
+
+function renderStateHistoryReferences(neighbours) {
+  const list = $('#state-history-reference-list');
+  list.innerHTML = '';
+  if (!neighbours || !neighbours.length) {
+    const empty = document.createElement('div');
+    empty.className = 'state-history-reference-empty';
+    empty.textContent = '표시할 다른 스테이트가 없습니다.';
+    list.appendChild(empty);
+    return;
+  }
+  for (const neighbour of neighbours) {
+    const card = document.createElement('article');
+    card.className = 'state-history-reference-card';
+    const header = document.createElement('div');
+    header.className = 'state-history-reference-header';
+    const heading = document.createElement('div');
+    heading.className = 'state-history-reference-heading';
+    const title = document.createElement('strong');
+    title.textContent = `${neighbour.name} · ID ${neighbour.id}`;
+    const meta = document.createElement('span');
+    meta.className = 'state-history-reference-meta';
+    meta.textContent = `${neighbour.fileName} · ${neighbour.relationDetail || '근접 예시'}`;
+    heading.append(title, meta);
+    header.appendChild(heading);
+
+    const actions = document.createElement('div');
+    actions.className = 'state-history-reference-actions';
+    const useHistory = document.createElement('button');
+    useHistory.type = 'button';
+    useHistory.textContent = 'history 복사';
+    useHistory.addEventListener('click', async () => {
+      await copyTextToClipboard(neighbour.history || 'history = {\n}');
+      setStatus(`인접 스테이트 ${neighbour.id}의 history를 복사했습니다.`);
+    });
+    const copyFull = document.createElement('button');
+    copyFull.type = 'button';
+    copyFull.textContent = '전체 코드 복사';
+    copyFull.addEventListener('click', async () => {
+      await copyTextToClipboard(neighbour.source || '');
+      setStatus(`인접 스테이트 ${neighbour.id} 전체 코드를 복사했습니다.`);
+    });
+    actions.append(useHistory, copyFull);
+
+    const code = document.createElement('textarea');
+    code.className = 'state-history-reference-code';
+    code.readOnly = true;
+    code.spellcheck = false;
+    code.wrap = 'off';
+    code.value = neighbour.source || '';
+    card.append(header, actions, code);
+    list.appendChild(card);
+  }
+}
+
+async function openStateHistoryEditor() {
+  if (state.selectedStateId === null || state.stateHistoryBusy) return;
+  const stateId = state.selectedStateId;
+  state.stateHistoryBusy = true;
+  $('#btn-state-history-open').disabled = true;
+  setStatus(`스테이트 ${stateId} 원문과 인접 예시를 불러오는 중…`);
+  try {
+    const result = await window.pywebview.api.get_state_history_editor(stateId);
+    if (!result || !result.ok) {
+      setStatus(`스테이트 원문 편집기 로드 실패: ${result ? result.error : 'unknown'}`);
+      return;
+    }
+    state.stateHistoryEditorId = stateId;
+    $('#state-history-target-label').textContent = `${result.stateName} · ID ${stateId} · ${result.fileName}`;
+    $('#state-history-editor').value = result.source || '';
+    renderStateHistoryReferences(result.neighbours || []);
+    $('#state-history-dialog').classList.remove('hidden');
+    setTimeout(() => $('#state-history-editor').focus(), 0);
+    setStatus(`스테이트 ${stateId} 원문 편집기 열림 · 인접 예시 ${(result.neighbours || []).length}개`);
+  } catch (error) {
+    setStatus(`스테이트 원문 편집기 로드 실패: ${error && error.message ? error.message : error}`);
+  } finally {
+    state.stateHistoryBusy = false;
+    if (state.selectedStateId !== null) $('#btn-state-history-open').disabled = false;
+  }
+}
+
+function closeStateHistoryEditor() {
+  $('#state-history-dialog').classList.add('hidden');
+  state.stateHistoryEditorId = null;
+}
+
+async function saveStateHistoryEditor() {
+  const stateId = state.stateHistoryEditorId;
+  if (stateId === null || state.stateHistoryBusy) return;
+  state.stateHistoryBusy = true;
+  $('#btn-state-history-save').disabled = true;
+  setStatus(`스테이트 ${stateId} 전체 코드 저장 중…`);
+  try {
+    const result = await window.pywebview.api.update_state_source(
+      stateId, $('#state-history-editor').value,
+    );
+    if (!result || !result.ok) {
+      setStatus(`전체 코드 저장 실패: ${result ? result.error : 'unknown'}`);
+      return;
+    }
+    $('#state-history-editor').value = result.source;
+    setStatus(`스테이트 ${stateId} 전체 코드 저장 완료 · 앱 반영 없음 · UTF-8 BOM 없음`);
+  } catch (error) {
+    setStatus(`전체 코드 저장 실패: ${error && error.message ? error.message : error}`);
+  } finally {
+    state.stateHistoryBusy = false;
+    $('#btn-state-history-save').disabled = false;
+  }
+}
+
 function updateSelectedRegionLabel() {
   const regionId = state.selectedRegionId;
   const swatch = $('#selected-region-swatch');
@@ -3204,6 +4119,7 @@ async function handleStateModeClick(x, y, shiftKey) {
     }
     updateSelectedStateLabel();
     refreshStateImageIfActive();
+    loadSelectedStateProperties();
     return;
   }
 
@@ -3467,24 +4383,29 @@ async function performHeightmapCoastSmooth(x, y) {
   if (!state.heightmapEditable || state.heightmapCoastBusy ||
       x < 0 || y < 0 || x >= state.width || y >= state.height) return;
   const input = $('#height-coast-width');
-  const width = Math.max(2, Math.min(128, Number(input?.value) || 12));
+  const width = Math.max(1, Math.min(128, Number(input?.value) || 2));
+  const opacityInput = $('#height-coast-opacity');
+  const opacity = Math.max(
+    1, Math.min(100, Number(opacityInput?.value) || 50),
+  );
   if (input) input.value = String(Math.round(width));
+  if (opacityInput) opacityInput.value = String(Math.round(opacity));
   state.heightmapCoastBusy = true;
-  setStatus('선택한 바다와 맞닿은 육지 해안을 다듬는 중...');
+  setStatus('선택한 바다 또는 호수와 맞닿은 육지 수변을 다듬는 중...');
   try {
     const result = await window.pywebview.api.smooth_heightmap_coast(
-      x, y, Math.round(width), 100,
+      x, y, Math.round(width), Math.round(opacity),
     );
     if (!result || !result.ok) {
-      setStatus(`해안 다듬기 실패: ${result ? result.error : 'unknown'}`);
+      setStatus(`수변 다듬기 실패: ${result ? result.error : 'unknown'}`);
       return;
     }
     const changes = result.changedPixels || [];
     if (!changes.length) {
       setStatus(
         result.adjacentProvinceIds?.length
-          ? '해안 고도가 이미 목표 경사와 같아 변경된 픽셀이 없습니다.'
-          : '선택한 바다에 4방향으로 맞닿은 육지 프로빈스가 없습니다.',
+          ? '수변 고도가 이미 목표 경사와 같아 변경된 픽셀이 없습니다.'
+          : '선택한 수역에 4방향으로 맞닿은 육지 프로빈스가 없습니다.',
       );
       return;
     }
@@ -3499,12 +4420,15 @@ async function performHeightmapCoastSmooth(x, y) {
     });
     state.redoStack = [];
     updateUndoButtons();
+    const waterLabel = result.waterType === 'lake' ? '호수' : '바다';
     setStatus(
-      `해안 다듬기 완료: 바다 ${result.seaProvinceId} · 인접 육지 ${result.adjacentProvinceIds.length}개 · ${changes.length}픽셀 · 해수면 ${result.seaLevel}`,
+      `수변 다듬기 완료: ${waterLabel} ${result.waterProvinceId ?? result.seaProvinceId} · ` +
+      `인접 육지 ${result.adjacentProvinceIds.length}개 · ${changes.length}픽셀 · ` +
+      `목표 94 · 투명도 ${Math.round(opacity)}%`,
     );
   } catch (error) {
     console.error('smooth_heightmap_coast failed', error);
-    setStatus(`해안 다듬기 실패: ${String(error)}`);
+    setStatus(`수변 다듬기 실패: ${String(error)}`);
   } finally {
     state.heightmapCoastBusy = false;
   }
@@ -3696,6 +4620,10 @@ function onMouseDown(e) {
     }
     if (state.mode === 'heightmap') {
       if (x < 0 || y < 0 || x >= state.width || y >= state.height) return;
+      if (state.tool === 'lasso') {
+        if (!beginSupportLassoDrag(x, y)) beginSupportLassoDrawing(x, y);
+        return;
+      }
       if (state.tool === 'coast') {
         performHeightmapCoastSmooth(x, y);
         return;
@@ -3715,6 +4643,10 @@ function onMouseDown(e) {
     }
     if (state.mode === 'rivers') {
       if (x < 0 || y < 0 || x >= state.width || y >= state.height) return;
+      if (state.tool === 'lasso') {
+        if (!beginSupportLassoDrag(x, y)) beginSupportLassoDrawing(x, y);
+        return;
+      }
       if (e.shiftKey || state.tool === 'fill') {
         performRiversProvinceFill(x, y);
         return;
@@ -3748,6 +4680,11 @@ function onMouseDown(e) {
       return;
     }
     if (state.mode === 'terrain') {
+      if (x < 0 || y < 0 || x >= state.width || y >= state.height) return;
+      if (state.tool === 'lasso') {
+        if (!beginSupportLassoDrag(x, y)) beginSupportLassoDrawing(x, y);
+        return;
+      }
       const useFill = e.shiftKey || state.tool === 'fill';
       if (useFill) {
         performTerrainFloodFill(x, y);
@@ -3823,6 +4760,14 @@ function onMouseMove(e) {
 
   // 커서 정보 + Delete 키 동작용 좌표 추적
   const [px, py] = screenToPixel(e.clientX, e.clientY);
+  if (state.supportLassoDrawing) {
+    appendSupportLassoPoint(px, py);
+    return;
+  }
+  if (state.supportLassoDrag) {
+    updateSupportLassoDrag(px, py);
+    return;
+  }
   if (state.provinceMoveDrag) {
     updateProvinceMoveDrag(px, py);
     return;
@@ -3905,6 +4850,16 @@ function onMouseMove(e) {
 
 async function onMouseUp(e) {
   if (!state.loaded) return;
+
+  if (e.button === 0 && state.supportLassoDrawing) {
+    finishSupportLassoDrawing();
+    return;
+  }
+
+  if (e.button === 0 && state.supportLassoDrag) {
+    await finishSupportLassoDrag();
+    return;
+  }
 
   if (e.button === 0 && state.provinceMoveDrag) {
     await finishProvinceMoveDrag();
@@ -4100,6 +5055,22 @@ function onWheel(e) {
 }
 
 function onKeyDown(e) {
+  if (e.ctrlKey && e.key.toLowerCase() === 's' &&
+      !$('#state-history-dialog')?.classList.contains('hidden')) {
+    e.preventDefault();
+    saveStateHistoryEditor();
+    return;
+  }
+  if (e.key === 'Escape' && !$('#state-history-dialog')?.classList.contains('hidden')) {
+    closeStateHistoryEditor();
+    e.preventDefault();
+    return;
+  }
+  if (e.key === 'Escape' && !$('#state-create-dialog')?.classList.contains('hidden')) {
+    closeStateCreateDialog();
+    e.preventDefault();
+    return;
+  }
   if (e.key === 'Escape' && !$('#province-tool-menu')?.hidden) {
     setProvinceToolMenuOpen(false);
     e.preventDefault();
@@ -4111,6 +5082,14 @@ function onKeyDown(e) {
     return;
   }
   if (!state.loaded) return;
+  if (e.key === 'Escape' && state.tool === 'lasso' &&
+      (state.supportLassoDrawing || state.supportLassoDrag ||
+       state.supportLassoSelectedPixels.length)) {
+    e.preventDefault();
+    clearSupportLasso(true);
+    canvas.style.cursor = 'crosshair';
+    return;
+  }
   if (e.ctrlKey && e.key.toLowerCase() === 'z') {
     e.preventDefault();
     undo();
@@ -4149,6 +5128,9 @@ function onKeyDown(e) {
     } else if (k === 'g' && ['province', 'terrain', 'heightmap', 'rivers'].includes(state.mode)) {
       e.preventDefault();
       setTool('fill');
+    } else if (k === 'l' && ['terrain', 'heightmap', 'rivers'].includes(state.mode)) {
+      e.preventDefault();
+      setTool('lasso');
     } else if ((e.key === 'Delete' || e.key === 'Backspace') &&
                state.mode === 'reference' && state.selectedReferenceLayerId !== null) {
       e.preventDefault();
@@ -4248,6 +5230,8 @@ function updateProvinceCountLabel(count) {
 // ---------- Undo/Redo ----------
 async function undo() {
   if (state.historyBusy) return;
+  if (state.supportLassoDrawing || state.supportLassoDrag ||
+      state.supportLassoSelectedPixels.length) clearSupportLasso();
   const stroke = state.undoStack.pop();
   if (!stroke) return;
   if (stroke.kind === 'supply_hub_add' || stroke.kind === 'supply_hub_delete') {
@@ -4428,6 +5412,8 @@ async function undo() {
 
 async function redo() {
   if (state.historyBusy) return;
+  if (state.supportLassoDrawing || state.supportLassoDrag ||
+      state.supportLassoSelectedPixels.length) clearSupportLasso();
   const stroke = state.redoStack.pop();
   if (!stroke) return;
   if (stroke.kind === 'supply_hub_add' || stroke.kind === 'supply_hub_delete') {
@@ -4676,6 +5662,8 @@ async function applyLoadedMap(result) {
   state.width = result.width;
   state.height = result.height;
   state.states = result.states || [];
+  state.stateCategoryNames = result.stateCategoryNames || [];
+  state.resourceNames = result.resourceNames || [];
   state.regions = result.regions || [];
   state.continents = result.continents || [];
   state.terrainEditable = Boolean(result.terrainEditable);
@@ -4729,12 +5717,18 @@ async function applyLoadedMap(result) {
     state.regionAssignments.set(provinceId, regionId);
   }
   state.selectedStateId = null;
+  state.loadedStatePropertiesId = null;
+  state.statePropertiesBusy = false;
+  state.stateHistoryEditorId = null;
+  state.stateHistoryBusy = false;
+  $('#state-history-dialog').classList.add('hidden');
   state.selectedRegionId = null;
   state.stateImageDirty = true;
   state.regionImageDirty = true;
   state.stateBorderImageData = null;
   state.stateBordersDirty = true;
   state.regionImageData = null;
+  clearStatePropertiesEditor();
 
   canvas.width = state.width;
   canvas.height = state.height;
@@ -4756,10 +5750,21 @@ async function applyLoadedMap(result) {
   provinceMoveHoleCanvas.height = state.height;
   provinceMoveCanvas.width = state.width;
   provinceMoveCanvas.height = state.height;
+  supportLassoCanvas.width = state.width;
+  supportLassoCanvas.height = state.height;
   state.provinceMoveSelectedIds = new Set();
   state.provinceMoveSelectedPixels = new Uint32Array(0);
   state.provinceMoveBounds = null;
   state.provinceMoveDrag = null;
+  state.supportLassoMode = null;
+  state.supportLassoPoints = [];
+  state.supportLassoSelectedPixels = new Uint32Array(0);
+  state.supportLassoBounds = null;
+  state.supportLassoDrawing = false;
+  state.supportLassoDrag = null;
+  selectionOverlayMaskDirty = true;
+  scheduleSelectionOverlayRender();
+  supportLassoCtx.clearRect(0, 0, state.width, state.height);
   state.supplySelectionImageData = supplySelectionCtx.createImageData(
     state.width, state.height,
   );
@@ -5067,6 +6072,65 @@ async function onPickColorClick() {
   }
 }
 
+function openStateCreateDialog() {
+  if (!state.loaded) {
+    setStatus('맵을 먼저 열어주세요.');
+    return;
+  }
+  setSupportEditorMenuOpen(false);
+  const dialog = $('#state-create-dialog');
+  const input = $('#state-create-name');
+  input.value = '';
+  dialog.classList.remove('hidden');
+  setTimeout(() => input.focus(), 0);
+}
+
+function closeStateCreateDialog() {
+  $('#state-create-dialog').classList.add('hidden');
+}
+
+async function confirmStateCreate() {
+  if (state.stateCreateBusy) return;
+  const input = $('#state-create-name');
+  const name = input.value.trim();
+  if (!name) {
+    setStatus('새 스테이트 파일명을 입력해주세요.');
+    input.focus();
+    return;
+  }
+  const confirmButton = $('#btn-state-create-confirm');
+  state.stateCreateBusy = true;
+  confirmButton.disabled = true;
+  let result;
+  try {
+    result = await window.pywebview.api.create_state(name, state.selectedStateId);
+  } catch (error) {
+    setStatus(`새 스테이트 생성 실패: ${error && error.message ? error.message : error}`);
+    state.stateCreateBusy = false;
+    confirmButton.disabled = false;
+    return;
+  }
+  if (!result || !result.ok) {
+    setStatus(`새 스테이트 생성 실패: ${result ? result.error : 'unknown'}`);
+    state.stateCreateBusy = false;
+    confirmButton.disabled = false;
+    return;
+  }
+  const created = result.state;
+  state.states.push(created);
+  state.states.sort((a, b) => a.id - b.id);
+  state.stateById.set(created.id, created);
+  state.selectedStateId = created.id;
+  state.stateImageDirty = true;
+  markStateBordersDirty();
+  state.stateCreateBusy = false;
+  confirmButton.disabled = false;
+  closeStateCreateDialog();
+  setMode('state');
+  updateSelectedStateLabel();
+  setStatus(`새 스테이트 ID ${created.id} 파일 생성 · Shift+좌클릭으로 프로빈스를 할당한 뒤 전체 저장하세요.`);
+}
+
 // ---------- 저장 ----------
 async function onSaveClick() {
   if (!state.loaded) return;
@@ -5076,14 +6140,6 @@ async function onSaveClick() {
     setStatus(`저장 실패: ${preview ? preview.error : 'unknown'}`);
     return;
   }
-  if (preview.riversDirty) {
-    const validation = await runRiverTopologyValidation();
-    if (!validation || !validation.ok || !validation.valid) {
-      setStatus('강 규칙 오류를 수정한 뒤 다시 저장해주세요.');
-      return;
-    }
-  }
-
   state.newProvincesPreview = preview.newProvinces || [];
 
   // 다이얼로그 채우기
@@ -5101,7 +6157,7 @@ async function onSaveClick() {
   tbody.innerHTML = '';
 
   const stateOptions = [`<option value="">(미할당)</option>`].concat(
-    state.states.map(s => `<option value="${s.id}">${s.id} - ${s.name}</option>`)
+    state.states.map(s => `<option value="${s.id}">${s.id} - ${escapeHtmlText(s.name)}</option>`)
   ).join('');
 
   for (const p of preview.newProvinces) {
@@ -5241,7 +6297,6 @@ async function runRiverTopologyValidation() {
   const issue = result.issues[0];
   const kindLabels = {
     source_count: '연결된 강의 발원지 수 오류',
-    cycle: '순환하는 강',
     thick_2x2: '2×2 두께 구간',
   };
   const first = issue
@@ -5292,14 +6347,44 @@ window.addEventListener('pywebviewready', () => {
   $('#btn-open').addEventListener('click', onOpenClick);
   $('#btn-overlay-bmp').addEventListener('click', onOverlayBmpClick);
   $('#btn-pick-color').addEventListener('click', onPickColorClick);
+  $('#btn-apply-province-rgb').addEventListener('click', applyManualProvinceRgb);
+  document.querySelectorAll('.province-rgb-input').forEach(input => {
+    input.addEventListener('keydown', event => {
+      if (event.key !== 'Enter') return;
+      event.preventDefault();
+      applyManualProvinceRgb();
+    });
+  });
   $('#btn-undo').addEventListener('click', undo);
   $('#btn-redo').addEventListener('click', redo);
   $('#btn-save').addEventListener('click', onSaveClick);
   $('#btn-save-confirm').addEventListener('click', onSaveConfirm);
   $('#btn-save-cancel').addEventListener('click', onSaveCancel);
+  $('#action-create-state').addEventListener('click', openStateCreateDialog);
+  $('#btn-state-create-confirm').addEventListener('click', confirmStateCreate);
+  $('#btn-state-create-cancel').addEventListener('click', closeStateCreateDialog);
+  $('#state-create-name').addEventListener('keydown', event => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      confirmStateCreate();
+    }
+  });
+  $('#btn-state-properties-save').addEventListener('click', saveSelectedStateProperties);
+  $('#btn-state-history-open').addEventListener('click', openStateHistoryEditor);
+  $('#btn-state-history-save').addEventListener('click', saveStateHistoryEditor);
+  $('#btn-state-history-cancel').addEventListener('click', closeStateHistoryEditor);
+  $('#state-history-editor').addEventListener('keydown', event => {
+    if (event.key !== 'Tab') return;
+    event.preventDefault();
+    const editor = event.target;
+    const start = editor.selectionStart;
+    const end = editor.selectionEnd;
+    editor.setRangeText('\t', start, end, 'end');
+  });
 
   $('#btn-tool-brush').addEventListener('click', () => setTool('brush'));
   $('#btn-tool-fill').addEventListener('click', () => setTool('fill'));
+  $('#btn-tool-lasso').addEventListener('click', () => setTool('lasso'));
   $('#btn-height-coast-smooth').addEventListener('click', () => setTool('coast'));
 
   $('#tab-province').addEventListener('click', () => setMode('province'));
@@ -5370,7 +6455,14 @@ window.addEventListener('pywebviewready', () => {
   coastWidthInput.addEventListener('change', () => {
     coastWidthInput.value = String(Math.max(
       Number(coastWidthInput.min),
-      Math.min(Number(coastWidthInput.max), Number(coastWidthInput.value) || 12),
+      Math.min(Number(coastWidthInput.max), Number(coastWidthInput.value) || 2),
+    ));
+  });
+  const coastOpacityInput = $('#height-coast-opacity');
+  coastOpacityInput.addEventListener('change', () => {
+    coastOpacityInput.value = String(Math.max(
+      Number(coastOpacityInput.min),
+      Math.min(Number(coastOpacityInput.max), Number(coastOpacityInput.value) || 50),
     ));
   });
   $('#toggle-heightmap-hue').addEventListener('change', event => {
@@ -5586,7 +6678,10 @@ window.addEventListener('pywebviewready', () => {
   canvas.addEventListener('contextmenu', onContextMenu);
   $('#canvas-area').addEventListener('wheel', onWheel, { passive: false });
   window.addEventListener('keydown', onKeyDown);
-  window.addEventListener('resize', scheduleProvinceBorderRender);
+  window.addEventListener('resize', () => {
+    scheduleProvinceBorderRender();
+    scheduleSelectionOverlayRender();
+  });
   provinceBorderCanvas.addEventListener('webglcontextlost', event => {
     event.preventDefault();
     provinceBorderRenderer = null;
@@ -5604,6 +6699,17 @@ window.addEventListener('pywebviewready', () => {
     state.stateBordersDirty = true;
     state.stateBorderImageData = null;
     refreshProvinceBorders(true);
+  });
+  selectionGpuCanvas.addEventListener('webglcontextlost', event => {
+    event.preventDefault();
+    selectionOverlayRenderer = null;
+    selectionOverlayMaskDirty = true;
+    selectionGpuCanvas.style.display = 'none';
+  });
+  selectionGpuCanvas.addEventListener('webglcontextrestored', () => {
+    selectionOverlayRenderer = null;
+    selectionOverlayMaskDirty = true;
+    scheduleSelectionOverlayRender();
   });
 
   updateCurrentColorLabel();
