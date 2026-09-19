@@ -57,6 +57,7 @@ const state = {
   stateCategoryNames: [],
   resourceNames: [],
   stateById: new Map(),       // id -> {id, name, color}
+  countryColors: new Map(),
   rgbToProvinceId: new Map(), // "r,g,b" -> province_id
   provinceRgbById: new Map(), // province_id -> [r,g,b]
   assignments: new Map(),     // province_id -> state_id
@@ -170,6 +171,18 @@ const supportLassoCtx = supportLassoCanvas.getContext('2d');
 supportLassoCtx.imageSmoothingEnabled = false;
 
 const provinceBorderCanvas = $('#province-border-canvas');
+const countryOverlay = new CountryOverlay(
+  $('#country-overlay-canvas'), $('#country-fill-canvas'), () => state,
+);
+const provinceIdOverlay = new ProvinceIdOverlay($('#province-id-colors-canvas'), () => state);
+const provinceSearch = new ProvinceSearch({
+  form: $('#province-search-form'), input: $('#province-search-input'),
+  clearButton: $('#province-search-clear'), marker: $('#province-search-marker'),
+  feedback: $('#province-search-feedback'),
+  viewport: $('#canvas-area'), getMapState: () => state,
+  locate: identifier => window.pywebview.api.locate_province(identifier),
+  transform: applyTransform, report: setStatus,
+});
 let provinceBorderRenderer = null;
 let provinceBorderFrame = 0;
 const selectionGpuCanvas = $('#selection-gpu-canvas');
@@ -1144,6 +1157,7 @@ function applyTransform() {
   scheduleSelectionOverlayRender();
   // SVG 마커는 transform과 별개로 화면 좌표로 다시 계산
   renderMarkers();
+  provinceSearch.render();
 }
 
 function screenToPixel(clientX, clientY) {
@@ -2273,6 +2287,8 @@ function addProvinceBorderDirtyBounds(points) {
 }
 
 function scheduleProvinceBorderRender() {
+  provinceIdOverlay.schedule();
+  countryOverlay.schedule();
   const provinceEnabled = $('#layer-province-border-toggle')?.checked;
   const stateEnabled = $('#layer-state-border-toggle')?.checked;
   if (!state.loaded || (!provinceEnabled && !stateEnabled) || provinceBorderFrame) return;
@@ -2283,6 +2299,9 @@ function scheduleProvinceBorderRender() {
 }
 
 function markProvinceBordersDirty(points = null) {
+  provinceSearch.clear();
+  provinceIdOverlay.invalidate();
+  countryOverlay.invalidate();
   const wasDirty = state.provinceBordersDirty;
   state.provinceBordersDirty = true;
   if (!points || (wasDirty && state.provinceBorderDirtyBounds === null)) {
@@ -2296,6 +2315,7 @@ function markProvinceBordersDirty(points = null) {
 }
 
 function markStateBordersDirty() {
+  countryOverlay.invalidate();
   state.stateBordersDirty = true;
   state.stateBorderImageData = null;
   scheduleProvinceBorderRender();
@@ -4065,7 +4085,11 @@ async function saveStateHistoryEditor() {
       return;
     }
     $('#state-history-editor').value = result.source;
-    setStatus(`스테이트 ${stateId} 전체 코드 저장 완료 · 앱 반영 없음 · UTF-8 BOM 없음`);
+    const editedState = state.stateById.get(stateId);
+    if (editedState) editedState.owner = result.owner;
+    countryOverlay.invalidate();
+    countryOverlay.schedule();
+    setStatus(`스테이트 ${stateId} 전체 코드 저장 완료 · 국가 소유권 반영 · 기타 변경은 다시 로드 · UTF-8 BOM 없음`);
   } catch (error) {
     setStatus(`전체 코드 저장 실패: ${error && error.message ? error.message : error}`);
   } finally {
@@ -5037,6 +5061,7 @@ function onContextMenu(e) {
 }
 
 function onWheel(e) {
+  if (e.target.closest('.map-panels')) return;
   if (!state.loaded) return;
   e.preventDefault();
   // 커서 위치 기준 줌
@@ -5658,6 +5683,12 @@ async function onOpenClick() {
 }
 
 async function applyLoadedMap(result) {
+  provinceSearch.clear();
+  state.loaded = false;
+  provinceIdOverlay.invalidate();
+  provinceIdOverlay.schedule();
+  countryOverlay.invalidate();
+  countryOverlay.schedule();
   clearReferenceLayers();
   state.width = result.width;
   state.height = result.height;
@@ -5694,6 +5725,8 @@ async function applyLoadedMap(result) {
   state.seaRgbSet = new Set((result.seaRgbs || []).map(([r, g, b]) => rgbKey(r, g, b)));
 
   // 스테이트 색상/매핑 룩업 테이블
+  state.countryColors = new Map(Object.entries(result.countryColors || {}));
+  countryOverlay.invalidate();
   state.stateById = new Map();
   for (const s of state.states) {
     state.stateById.set(s.id, s);
@@ -5917,6 +5950,8 @@ async function applyLoadedMap(result) {
   state.provinceBordersDirty = true;
   state.provinceBorderDirtyBounds = null;
   refreshProvinceBorders();
+  countryOverlay.schedule();
+  provinceIdOverlay.schedule();
   updateUndoButtons();
   updateSelectedStateLabel();
 
@@ -6237,6 +6272,8 @@ async function onSaveConfirm() {
     if (Array.isArray(r.regionAssignments)) {
       state.regionAssignments = new Map(r.regionAssignments);
     }
+    provinceIdOverlay.invalidate();
+    provinceIdOverlay.schedule();
     // 할당 맵 캐시 무효화 (탭 다시 들어가면 재구성)
     state.stateImageDirty = true;
     state.regionImageDirty = true;
@@ -6543,6 +6580,8 @@ window.addEventListener('pywebviewready', () => {
   refreshRivers();
   refreshTerrain();
 
+  $('#layer-province-id-colors-toggle').addEventListener('change', () => provinceIdOverlay.schedule());
+
   const borderToggle = $('#layer-province-border-toggle');
   borderToggle.addEventListener('change', () => refreshProvinceBorders(true));
   const borderWidth = $('#layer-province-border-width');
@@ -6560,6 +6599,19 @@ window.addEventListener('pywebviewready', () => {
     const width = Math.max(0.1, Number(stateBorderWidth.value) || 1.1);
     stateBorderWidthReadout.textContent = `${width.toFixed(2)}px`;
     scheduleProvinceBorderRender();
+  });
+
+  $('#layer-country-border-toggle').addEventListener('change', () => {
+    $('#country-colors-note').hidden = true;
+    countryOverlay.schedule();
+  });
+  $('#layer-country-colors-toggle').addEventListener('change', () => {
+    $('#country-colors-note').hidden = true;
+    countryOverlay.schedule();
+  });
+  $('#layer-country-border-width').addEventListener('input', event => {
+    $('#layer-country-border-width-readout').textContent = `${Number(event.target.value).toFixed(2)}px`;
+    countryOverlay.schedule();
   });
 
   const referenceList = $('#reference-layer-list');

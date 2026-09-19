@@ -14,6 +14,8 @@ import numpy as np
 import webview
 
 from core.color_pool import ColorPool
+from core.country_colors import load_country_colors
+from core.province_locator import locate_province
 from core.definitions import (
     MapPaths,
     Province,
@@ -85,6 +87,7 @@ from core.support_editors import (
 from core.province_analyzer import find_adjacent_colors
 from core.province_mover import move_province_group
 from core.state_creator import create_state as create_state_files
+from core.state_ownership import parse_state_owner
 from core.state_neighbors import rank_adjacent_states
 from core.state_properties import (
     read_state_history_block,
@@ -244,6 +247,9 @@ class Api:
                     paths.common_terrain_dir
                 )
                 self.states = load_state_files(paths.history_states_dir)
+                country_colors = load_country_colors(
+                    os.path.join(paths.mod_root, "common", "countries", "colors.txt")
+                )
                 self.state_category_names = load_state_category_names(
                     os.path.join(paths.mod_root, "common", "state_category")
                 )
@@ -344,12 +350,14 @@ class Api:
                         {
                             "id": s.id,
                             "name": s.name,
+                            "owner": s.owner,
                             "fileName": os.path.basename(s.file_path),
                             "color": list(_state_color_from_id(s.id)),
                             "provinceCount": len(s.province_ids),
                         }
                         for s in self.states
                     ],
+                    "countryColors": country_colors,
                     # province_id -> state_id 매핑 (프론트엔드가 스테이트 맵 그릴 때 사용)
                     "assignments": [
                         [pid, sid] for pid, sid in self.assignments.items()
@@ -1382,6 +1390,7 @@ class Api:
                 "state": {
                     "id": state_info.id,
                     "name": state_info.name,
+                    "owner": state_info.owner,
                     "fileName": os.path.basename(state_info.file_path),
                     "color": list(_state_color_from_id(state_info.id)),
                     "provinceCount": 0,
@@ -1493,14 +1502,15 @@ class Api:
             return {"ok": False, "error": str(exc)}
 
     def update_state_source(self, state_id: int, source: str) -> dict:
-        """Replace one complete state file without changing the loaded map model."""
+        """Replace state source and refresh ownership used by the country overlay."""
         try:
             sid = int(state_id)
             target = next((item for item in self.states if item.id == sid), None)
             if target is None:
                 raise ValueError(f"존재하지 않는 스테이트 ID입니다: {sid}")
             saved = write_state_source(target.file_path, source)
-            return {"ok": True, "stateId": sid, "source": saved}
+            target.owner = parse_state_owner(saved)
+            return {"ok": True, "stateId": sid, "source": saved, "owner": target.owner}
         except (OSError, TypeError, ValueError) as exc:
             return {"ok": False, "error": str(exc)}
 
@@ -2479,6 +2489,13 @@ class Api:
         except Exception as exc:
             traceback.print_exc()
             return {"ok": False, "error": str(exc), "trace": traceback.format_exc()}
+
+    def locate_province(self, province_id: int) -> dict:
+        """검색한 ID의 현재 픽셀 위치와 범위를 반환한다."""
+        with self._lock:
+            if self.provinces_arr is None:
+                return {"ok": False, "error": "맵이 로드되지 않았습니다."}
+            return locate_province(self.provinces_arr, self.provinces, province_id)
 
     def get_province_rgb(self, province_id: int) -> dict:
         """프로빈스 ID로 RGB 조회 (캔버스 마스크 색칠용)."""

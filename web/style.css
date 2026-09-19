@@ -451,7 +451,7 @@ input[type="range"] {
 #protect-canvas {
   pointer-events: none;
 }
-#province-border-canvas {
+#province-border-canvas, #country-overlay-canvas {
   position: absolute;
   inset: 0;
   width: 100%;
@@ -469,7 +469,7 @@ input[type="range"] {
   pointer-events: none;
   z-index: 26;
 }
-.state-border-color {
+.state-border-color, .country-border-color {
   display: inline-block;
   width: 8px;
   height: 8px;
@@ -477,6 +477,19 @@ input[type="range"] {
   border-radius: 50%;
   background: #ff4fa3;
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.45);
+}
+.country-border-color {
+  background: #ffff00;
+}
+#country-fill-canvas, #province-id-colors-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: none;
+  pointer-events: none;
+  image-rendering: pixelated;
+  transform-origin: 0 0;
+  z-index: 12;
 }
 #support-brush-preview {
   position: absolute;
@@ -657,10 +670,19 @@ input[type="range"] {
 }
 
 /* 레이어 컨트롤 패널 (우상단 부유) */
-.layer-panel {
+.map-panels {
   position: absolute;
   top: 12px;
   right: 12px;
+  max-height: calc(100% - 24px);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  z-index: 50;
+}
+.layer-panel {
+  flex-shrink: 0;
   background: rgba(42, 42, 49, 0.92);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -797,9 +819,6 @@ input[type="range"] {
 }
 
 /* 검증 패널 (레이어 패널 아래) */
-.check-panel {
-  top: 380px;
-}
 .check-row {
   display: flex;
   align-items: center;
@@ -828,11 +847,6 @@ input[type="range"] {
 /* 강이 정상이면 녹색, 비정상이면 적색 표시 */
 .badge.ok { background: var(--accent); }
 .badge.warn { background: var(--danger); }
-
-/* 기능 패널 (검증 패널 아래) */
-.tool-panel {
-  top: 620px;
-}
 
 /* 감독자 다이얼로그: 큰 폭 + 좌우 반반 구조 */
 .compact-dialog-inner {
@@ -1893,3 +1907,54 @@ td select {
 }
 
 /* (#status 규칙은 위쪽 .swatch와 함께 정의됨) */
+#province-search-input {
+  width: 100px;
+  min-width: 80px;
+  height: 32px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-3);
+  color: var(--fg);
+  font: inherit;
+}
+
+#province-search-input:focus {
+  outline: 1px solid var(--accent);
+}
+
+#province-search-feedback {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--fg);
+  font-size: 12px;
+}
+
+#province-search-marker {
+  position: absolute;
+  z-index: 32;
+  pointer-events: none;
+  transform: translate(-50%, -100%) translateY(-18px);
+  padding: 3px 7px;
+  border: 1px solid #fff;
+  border-radius: 4px;
+  background: #17384f;
+  color: #fff;
+  font: bold 12px sans-serif;
+  white-space: nowrap;
+  box-shadow: 0 1px 4px #000;
+}
+
+#province-search-marker::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  bottom: -18px;
+  width: 18px;
+  height: 18px;
+  transform: translate(-50%, 50%);
+  border: 3px solid #fff;
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px #17384f;
+}

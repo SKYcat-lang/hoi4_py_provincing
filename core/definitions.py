@@ -63,6 +63,7 @@ class StateInfo:
     file_path: str
     name: str
     province_ids: list[int] = field(default_factory=list)
+    owner: str | None = None
 
 
 @dataclass

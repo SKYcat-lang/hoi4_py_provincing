@@ -14,6 +14,7 @@ from typing import Optional
 
 import numpy as np
 from PIL import Image
+from .state_ownership import parse_state_owner
 
 from .definitions import (
     MapPaths,
@@ -384,6 +385,7 @@ def load_state_files(states_dir: str) -> list[StateInfo]:
             file_path=path,
             name=name_match.group(1) if name_match else f"STATE_{id_match.group(1)}",
             province_ids=province_ids,
+            owner=parse_state_owner(text),
         ))
     return states
 
