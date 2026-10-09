@@ -15,6 +15,7 @@ from typing import Optional
 import numpy as np
 from PIL import Image
 from .state_ownership import parse_state_owner
+from .state_properties import parse_state_impassable
 
 from .definitions import (
     MapPaths,
@@ -386,6 +387,7 @@ def load_state_files(states_dir: str) -> list[StateInfo]:
             name=name_match.group(1) if name_match else f"STATE_{id_match.group(1)}",
             province_ids=province_ids,
             owner=parse_state_owner(text),
+            impassable=parse_state_impassable(text),
         ))
     return states
 

@@ -92,10 +92,10 @@ def _split_lines_preserve(text: str) -> tuple[list[str], str]:
 
 
 def update_buildings_txt(path: str, removed_ids: set[int]) -> dict:
-    """첫 컬럼(= 건물이 속한 prov_id) 또는 마지막 컬럼(= naval_base_spawn 등이
-    가리키는 prov_id)이 removed_ids에 포함된 행을 모두 제거.
+    """Remove rows whose explicit port target province was removed.
 
-    형식: `prov_id;type;X;height;Y;rot;naval_target_prov_id_or_0`
+    The first field is a STATE ID; coordinate ownership cannot be inferred from it.
+    형식: `state_id;type;X;height;Z;rot;target_prov_id_or_0`
     """
     if not os.path.isfile(path) or not removed_ids:
         return {"changed": False, "removedLines": 0, "remappedTokens": 0}
@@ -115,9 +115,6 @@ def update_buildings_txt(path: str, removed_ids: set[int]) -> dict:
             first = int(parts[0])
         except (ValueError, IndexError):
             out.append(line)
-            continue
-        if first in removed_ids:
-            removed += 1
             continue
         # 마지막 컬럼: naval_base_spawn / floating_harbor의 target prov
         if len(parts) >= 7:

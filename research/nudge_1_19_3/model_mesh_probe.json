@@ -1,0 +1,277 @@
+{
+  "files_parsed": 131,
+  "failures": [],
+  "samples": {
+    "factory.mesh": [
+      {
+        "path": "root",
+        "properties": {
+          "pdxasset": [
+            1,
+            0
+          ]
+        }
+      },
+      {
+        "path": "object",
+        "properties": {}
+      },
+      {
+        "path": "object/polySurfaceShape1",
+        "properties": {}
+      },
+      {
+        "path": "object/polySurfaceShape1/mesh",
+        "properties": {
+          "p": {
+            "count": 954,
+            "type": "f"
+          },
+          "n": {
+            "count": 954,
+            "type": "f"
+          },
+          "ta": {
+            "count": 1272,
+            "type": "f"
+          },
+          "u0": {
+            "count": 636,
+            "type": "f"
+          },
+          "tri": {
+            "count": 1062,
+            "type": "i"
+          }
+        }
+      },
+      {
+        "path": "object/polySurfaceShape1/mesh/aabb",
+        "properties": {
+          "min": [
+            -0.2664424479007721,
+            -0.033017273992300034,
+            -0.6190427541732788
+          ],
+          "max": [
+            0.4630449712276459,
+            1.1649516820907593,
+            0.39181214570999146
+          ]
+        }
+      },
+      {
+        "path": "object/polySurfaceShape1/mesh/material",
+        "properties": {
+          "shader": [
+            "PdxMeshAdvancedSnow"
+          ],
+          "diff": [
+            "factory_d.dds"
+          ],
+          "n": [
+            "factory_n.dds"
+          ],
+          "spec": [
+            "factory_s.dds"
+          ]
+        }
+      },
+      {
+        "path": "locator",
+        "properties": {}
+      },
+      {
+        "path": "locator/factorysmoke2",
+        "properties": {
+          "p": [
+            -0.15859980881214142,
+            1.1649516820907593,
+            0.30160224437713623
+          ],
+          "q": [
+            0.0,
+            0.0,
+            -0.0,
+            -1.0
+          ]
+        }
+      },
+      {
+        "path": "locator/factorysmoke",
+        "properties": {
+          "p": [
+            0.353033185005188,
+            1.1649516820907593,
+            -0.22881373763084412
+          ],
+          "q": [
+            0.0,
+            0.0,
+            -0.0,
+            -1.0
+          ]
+        }
+      }
+    ],
+    "floating_harbor.mesh": [
+      {
+        "path": "root",
+        "properties": {
+          "pdxasset": [
+            1,
+            0
+          ]
+        }
+      },
+      {
+        "path": "object",
+        "properties": {}
+      },
+      {
+        "path": "object/Floating_harborShape",
+        "properties": {}
+      },
+      {
+        "path": "object/Floating_harborShape/mesh",
+        "properties": {
+          "p": {
+            "count": 10158,
+            "type": "f"
+          },
+          "n": {
+            "count": 10158,
+            "type": "f"
+          },
+          "ta": {
+            "count": 13544,
+            "type": "f"
+          },
+          "u0": {
+            "count": 6772,
+            "type": "f"
+          },
+          "tri": {
+            "count": 6318,
+            "type": "i"
+          }
+        }
+      },
+      {
+        "path": "object/Floating_harborShape/mesh/aabb",
+        "properties": {
+          "min": [
+            -10.805739402770996,
+            -0.8156356811523438,
+            -0.0026946067810058594
+          ],
+          "max": [
+            10.805739402770996,
+            10.364876747131348,
+            20.186063766479492
+          ]
+        }
+      },
+      {
+        "path": "object/Floating_harborShape/mesh/material",
+        "properties": {
+          "shader": [
+            "PdxMeshAdvanced"
+          ],
+          "diff": [
+            "floating_harbor_diffuse.dds"
+          ],
+          "n": [
+            "floating_harbor_normal.dds"
+          ],
+          "spec": [
+            "floating_harbor_specular.dds"
+          ]
+        }
+      },
+      {
+        "path": "object/Floating_harborShape/mesh/skin",
+        "properties": {
+          "bones": [
+            1
+          ],
+          "ix": {
+            "count": 13544,
+            "type": "i"
+          },
+          "w": {
+            "count": 13544,
+            "type": "f"
+          }
+        }
+      },
+      {
+        "path": "object/Floating_harborShape/skeleton",
+        "properties": {}
+      },
+      {
+        "path": "object/Floating_harborShape/skeleton/root",
+        "properties": {
+          "ix": [
+            0
+          ],
+          "tx": [
+            1.0,
+            -0.0,
+            -0.0,
+            -0.0,
+            1.0,
+            0.0,
+            -0.0,
+            0.0,
+            1.0,
+            -0.0,
+            0.0,
+            0.0
+          ]
+        }
+      },
+      {
+        "path": "locator",
+        "properties": {}
+      },
+      {
+        "path": "locator/locator1",
+        "properties": {
+          "p": [
+            0.0,
+            0.0,
+            -0.0
+          ],
+          "q": [
+            0.0,
+            0.0,
+            -0.0,
+            -1.0
+          ],
+          "tx": [
+            1.0,
+            0.0,
+            -0.0,
+            0.0,
+            0.0,
+            1.0,
+            -0.0,
+            0.0,
+            -0.0,
+            -0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            -0.0,
+            1.0
+          ],
+          "pa": [
+            "root"
+          ]
+        }
+      }
+    ]
+  }
+}

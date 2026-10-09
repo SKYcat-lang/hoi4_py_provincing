@@ -1,0 +1,76 @@
+{
+  "date": "2026-10-10",
+  "scope": "경계 처리, 특수 배치 개수, 항만 예외의 후속 조사. 기능 통합 및 기존 수정 사항 검토 제외.",
+  "method": "공개 문서 검색, 기존 1.19.3.0 역어셈블 재검토, 설치된 바닐라 정의와 항만 레코드 읽기 전용 집계. 게임 실행 검증 없음.",
+  "boundaries": {
+    "confirmed_static": [
+      "0x141673afc..0x141673b47: X/Z를 정수로 변환한 뒤 음수 및 폭/높이 이상을 거부하고 범위 밖은 프로빈스 0으로 처리한다. 이 경로는 좌우 자동 래핑을 하지 않는다.",
+      "0x141670ed0..0x141670f23: 후보 주변 8방향 조회도 범위를 검사하며 이 경로에는 좌우 래핑이 없다.",
+      "0x141671040..0x1416710c2: 일반 후보의 주변 주 일치 조건을 우선 적용하고 후보가 없으면 완화하는 재탐색이 있다. 해안 후보는 육지/호수가 아닌 이웃을 찾는다.",
+      "0x141671168..0x141671191: 최종 후보가 없으면 실패를 반환한다. 모든 지형에서 생성 성공을 보장하는 루틴은 아니다."
+    ],
+    "design_inference": [
+      "저장할 좌표를 0 <= X < width, 0 <= Z < height로 제한하고 저장 정밀도로 반올림한 뒤 프로빈스 소속을 다시 검사한다.",
+      "지도 이음매의 인접 관계와 저장 좌표의 유효 범위를 별도로 취급한다.",
+      "좁은 땅에서는 경계와의 여유 거리만 완화하고 선택 프로빈스 소속 조건은 유지한다."
+    ],
+    "unresolved": "이음매를 통한 항만 연결, 소수 좌표가 경계에 정확히 걸리는 경우는 새 게임에서 검증할 필요가 있다."
+  },
+  "counts": {
+    "vanilla_primary_source": "D:/SteamLibrary/steamapps/common/Hearts of Iron IV/common/buildings/00_buildings.txt",
+    "distinctions": [
+      "level_cap의 province_max/state_max는 건설 레벨 제한이며 배치 레코드 개수와 동일하지 않다.",
+      "show_on_map은 표시용 배치 수, show_on_map_meshes는 배치에 사용되는 엔티티 수이다.",
+      "명시적 spawn_point가 있으면 공유 템플릿의 type/max 및 연결 관계를 해석해야 한다."
+    ],
+    "example": "naval_base는 province_max=10, show_on_map=1, show_on_map_meshes=3, naval_base_spawn.max=1이다. 이를 10개 또는 3개의 배치 레코드로 확대하면 안 된다.",
+    "static_expected_count": {
+      "ordinary_state": "템플릿 max",
+      "coastal_state": "min(템플릿 max, 해안 육지 프로빈스 수)",
+      "provincial_positive_max": "해당 육지/해안 프로빈스 수. 추적한 총량 계산 함수에서는 max를 곱하지 않는다.",
+      "candidate_capacity": "프로빈스 후보 선택에는 기존 배치 수와 템플릿 max를 비교하는 별도 제한이 있다."
+    },
+    "unresolved": "프로빈스 max > 1에 대한 공개 문서 설명과 현재 Nudge 총량 계산 사이에 차이가 있다. 원본 버그라고 단정하지 않는다. max=2인 최소 실험에서 수동 배치 2개 로드 및 Validate 동작을 나눠 확인해야 한다."
+  },
+  "ports": {
+    "vanilla_last_field_audit": {
+      "files": ["map/buildings.txt", "map/definition.csv"],
+      "method": "7개 필드 레코드 중 두 항만 종류를 골라 마지막 필드 ID를 definition.csv의 land/sea/lake와 대조. 중복 제거하지 않은 행 개수이며 위치 픽셀이나 인접 관계 검사는 아니다.",
+      "naval_base_spawn": {"rows": 2362, "sea_targets": 2362},
+      "floating_harbor": {"rows": 2334, "land_targets": 2334}
+    },
+    "conclusions": [
+      "일반 항구와 부유식 항구의 마지막 필드는 동일 의미로 처리할 수 없다.",
+      "일반 항구는 육지 위치와 연결 바다를, 부유식 항구는 통상 바다 위치와 대상 육지를 다룬다.",
+      "0x1416760f0의 바다 선택 루틴은 실제 인접 목록을 순회하고 육지/호수를 제외한다. 가까워 보이는 물 픽셀이나 해안 플래그만으로 연결을 확정해서는 안 된다.",
+      "복수의 인접 바다가 있을 때 선택한 해안 구간, 연결 바다 ID, 방향을 일관되게 정해야 한다."
+    ],
+    "unresolved": "모델별 방향 보정, 이음매 항만, 부유식 항구의 비정상 기존 좌표는 실행 검증 대상으로 남는다. 기존 바닐라 행을 모두 정답 또는 오류로 취급하지 않는다."
+  },
+  "sources": [
+    {
+      "url": "https://hoi4.paradoxwikis.com/Building_modding",
+      "access": "직접 열기 401. 아래 문서 복제본으로 설명을 확인했다."
+    },
+    {
+      "url": "https://cooderatom.github.io/hoi4-zh-wiki/Building_modding.html",
+      "use": "show_on_map, show_on_map_meshes, spawn_points 문서 설명. 항만 마지막 필드의 일반화는 현재 로컬 데이터와 충돌하므로 채택하지 않는다."
+    },
+    {
+      "url": "https://github.com/klimPaskov/hoi4-agent-tools/blob/main/docs/map.md",
+      "use": "도구 작성자의 문서가 floating_harbor의 바다 위치/육지 대상 차이를 명시하며 로컬 데이터 및 기존 역분석과 일치한다. 게임 엔진의 공식 사양은 아니다."
+    },
+    {
+      "url": "https://github.com/noahsabaj/HOI4-AI/blob/main/src/hoi4_arena/mapgen.py",
+      "use": "공개 생성 구현도 검토했으나 일반 항구와 부유식 항구를 같은 위치/바다 대상 형식으로 출력하므로 이 부분의 근거로 채택하지 않았다."
+    }
+  ],
+  "next_validation_cases": [
+    "가느다란 육지, 작은 섬, 오목하거나 분리된 프로빈스의 내부 좌표",
+    "좌우 이음매, 위아래 끝, 두 자리 소수 저장 후 소속 유지",
+    "주 max=3과 프로빈스 max=2, 공유 배치점, 기존 부분 배치",
+    "둘 이상의 바다와 접한 해안, 호수만 접한 육지, 해안 플래그 불일치",
+    "일반 항구와 부유식 항구 각각의 위치/연결 ID/방향",
+    "생성 후 다시 실행했을 때 중복 추가가 없는지"
+  ]
+}

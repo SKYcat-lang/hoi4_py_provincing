@@ -1,0 +1,9 @@
+{
+  "records": 4608,
+  "workers": 8,
+  "serial_seconds": 0.06217609999839624,
+  "thread_pool_seconds": 0.11387210000066261,
+  "scope": "Warm candidate calculation only, one task per building, independent seeded RNG; excludes indexing, document transactions and rendering.",
+  "decision": "Keep CPU generation serial with NumPy and shared candidate caches; use GPU instancing for model rendering. GPU compute and process pools were not implemented or benchmarked.",
+  "nudge_comparison": "No identical live-Nudge baseline; do not claim faster than vanilla."
+}

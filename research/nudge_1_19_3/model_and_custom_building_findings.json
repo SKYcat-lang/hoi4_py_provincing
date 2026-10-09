@@ -1,0 +1,125 @@
+{
+  "date": "2026-10-10",
+  "scope": "Research only: building model resolution and mod-defined placement templates. No production implementation, game/mod writes, executable patching or live Nudge experiment.",
+  "binary_version": "1.19.3.0",
+  "binary_sha256": "7dc947be34970da1e1c787bcddbe7f62b610ff258aebf8f06aa8b348f3a031d5",
+  "address_convention": "Preferred virtual addresses; function names are analyst descriptions, not recovered symbols.",
+  "model_resolution": {
+    "chain": ["building or resolved spawn-point identifier", "named entity in .asset", "pdxmesh definition in .gfx", ".mesh geometry and embedded material references", "DDS textures, optional .gfx overrides and .anim/state/locator data"],
+    "observed_entity_names": {
+      "ordinary": "building_<identifier>",
+      "multiple_mesh_variants": "building_<identifier>_1 through _N when template mesh count exceeds one",
+      "destroyed": "building_<identifier>_destroyed",
+      "floating_harbor": "floating_harbor_entity"
+    },
+    "examples": [
+      {"placement": "arms_factory", "entity": "building_arms_factory", "pdxmesh": "building_arms_factory", "mesh": "gfx/models/buildings/factory.mesh", "entity_scale": 1.7},
+      {"placement": "naval_base_spawn", "entity": "building_naval_base_spawn", "pdxmesh": "building_naval_base_1", "note": "Shared spawn-point preview entity is distinct from the naval_base building's numbered entity variants."},
+      {"placement": "floating_harbor", "entity": "floating_harbor_entity", "pdxmesh": "floating_harbor_mesh", "mesh": "gfx/models/buildings/floating_harbor.mesh", "entity_scale": 0.2}
+    ],
+    "binary_evidence": [
+      {"address": "0x141675750", "observation": "Enumerates templates, builds building_ names with optional numbered suffix, and resolves entity pointers through 0x142293530. Also resolves destroyed names and a separate special-category entity list."},
+      {"address": "0x141675eb0..0x141675f61", "observation": "Special-category path obtains name via 0x140689620, appends _entity, then uses the same entity lookup."},
+      {"address": "0x141676450", "observation": "Instance creation selects an entity pointer from ordinary, destroyed or special cached lists. Reports invalid spawn point / missing mesh / missing entity."},
+      {"address": "0x14166fbd6..0x14166fbf0", "observation": "Ordinary generation checks the resolved entity list before continuing; absent model definitions can prevent placement generation."}
+    ],
+    "interpretation": "The inspected Nudge/map-building path resolves named engine entities and uses cached entity pointers. It is not simply opening a .mesh file afresh for every placement. Exact asset-manager preload timing was not traced.",
+    "mesh_probe": {
+      "artifact": "model_mesh_probe.json",
+      "root": "D:/SteamLibrary/steamapps/common/Hearts of Iron IV/gfx/models/buildings",
+      "files_structurally_parsed": 131,
+      "failures": 0,
+      "method": "Independent read-only Python probe of @@b@ header, depth-marked objects, typed integer/float/string properties; complete byte traversal of each file. No Blender or game process needed.",
+      "factory": {"vertices": 318, "triangles": 354, "material_shader": "PdxMeshAdvancedSnow", "diffuse": "factory_d.dds"},
+      "floating_harbor": {"vertices": 3386, "triangles": 2106, "material_shader": "PdxMeshAdvanced", "skin_and_skeleton_present": true},
+      "limit": "Structural decoding does not establish correct rendering, skinning, valid triangle indices for every file, or support for all DLC/custom assets. No visual render was performed."
+    }
+  },
+  "custom_building_placement": {
+    "pipeline": [
+      "Load common/buildings building and explicit spawn_points definitions from the effective game/mod file set.",
+      "Synthesize templates from building display/scope fields and resolve explicit spawn_point indirection.",
+      "Enumerate resolved, unredirected templates in Nudge; separately append the built-in floating-harbor category.",
+      "Resolve preview entities and calculate required graphical placement counts for the selected state.",
+      "Run the shared land/centered/coastal generator, or built-in special generator, then serialize graphical placement records."
+    ],
+    "data_driven_controls": [
+      "show_on_map controls graphical placement count; it is distinct from level_cap construction limits.",
+      "province_max presence/positive scope data distinguishes provincial buildings from state buildings; explicit templates use type = state or province.",
+      "Explicit spawn_points use max; multiple buildings can share one named spawn point.",
+      "only_costal is the actual misspelled key; it selects coastal eligibility, not the floating-harbor algorithm.",
+      "centered is parsed by the spawn-point parser and copied from generated building templates.",
+      "disable_auto_nudging excludes the template from automatic reconciliation; vanilla dams, locks and landmarks use it.",
+      "show_on_map_meshes controls entity variants, not the number of independent placement rows."
+    ],
+    "practical_custom_workflow": [
+      "Define the custom building in common/buildings and choose its graphical scope/count, or reference an explicitly named spawn point.",
+      "Provide matching building_<identifier> entity definitions and their pdxmesh/mesh/texture dependencies; shared spawn points need their own preview entity, as vanilla naval_base_spawn demonstrates.",
+      "Load the mod in the game and use Nudge's selected-state placement/reconciliation workflow. This workflow is inferred from the inspected common pipeline, not a newly executed custom-mod experiment.",
+      "Store resulting coordinates in map/buildings.txt. These graphical locations do not themselves set constructed building levels in state history or create gameplay effects."
+    ],
+    "record_shape": "state_id;resolved_spawn_point_or_special_name;x;y;z;rotation;type_specific_link",
+    "record_notes": [
+      "The first field is a state ID, not a province ID.",
+      "The name can be a shared spawn-point name rather than the gameplay building name.",
+      "Ordinary port links identify a sea province; floating-harbor links identify the associated land province. Preserve these distinct semantics."
+    ],
+    "binary_evidence": [
+      {"address": "0x140686280", "observation": "Builds the spawn-point database and resolves named/shared points. Error string explicitly rejects a building and named spawn point having the same identifier."},
+      {"address": "0x1414df8d0", "observation": "Synthesizes template fields from a building, including scope, count, mesh count and flags."},
+      {"address": "0x1414df9b0", "observation": "Spawn-point parser accepts a fixed set of fields. The type branch recognizes only state and province; other values report Unknown spawn point type."},
+      {"address": "0x141b45650", "observation": "Enumerates the database's unredirected templates and appends category 1 explicitly."},
+      {"address": "0x141b4e460", "observation": "Reconciles a state's expected and existing placements, skipping auto-nudging-disabled templates and generating deficits. Removal branches also exist."}
+    ],
+    "token_crosscheck": {
+      "only_costal": {"id": "0x2f40", "template_offset": "0x12"},
+      "show_on_map_meshes": {"id": "0x2f96", "template_offset": "0x18"},
+      "centered": {"id": "0x4dae", "template_offset": "0x13"},
+      "disable_auto_nudging": {"id": "0x4417", "template_offset": "0x20"},
+      "method": "Cross-reference token-registration strings and their constant IDs against parser comparisons, not string naming alone."
+    }
+  },
+  "special_rules": {
+    "floating_harbor": {
+      "classification": "Built-in category 1, not an ordinary mod-declared spawn-point type.",
+      "name_mapping": "0x140689620 recognizes category 1; its string descriptor at 0x1427e4870 points to floating_harbor.",
+      "dispatch": "0x14166fe0a compares category with 1; 0x14166fe17 calls 0x14166f7b0.",
+      "algorithm": "Uses a coastal adjacency anchor and land center to offset into the selected sea, with a sea-center fallback and separate orientation logic. See coastal_placement_followup.json for prior evidence and incomplete parity results.",
+      "configurable_parameter": "NGraphics.DEFAULT_NUDGE_FLOATING_HARBOR_DIST = 7.0 in common/defines/00_graphics.lua:1310. This is a global parameter of the existing built-in algorithm, not a per-custom-building callback."
+    },
+    "conclusion": "Ordinary custom buildings can reuse supported placement parameters. No user-defined placement algorithm hook was found in the inspected parser, template enumeration or generator dispatch. Giving a custom building a new name, coastal flag, or floating-harbor-looking model does not by itself route it into the built-in special category.",
+    "manual_layouts": "For irregular landmarks/bridges/dams or a scripted composition, authored coordinates and auto-nudging exclusion are the evidenced vanilla pattern. An editor-side custom placement rule could generate supported records, but would not extend the game's accepted record types or runtime behavior.",
+    "not_claimed": "This is a bounded static-analysis conclusion, not a proof that no other engine subsystem offers any workaround. It does not establish the validity of arbitrary offshore ordinary-building coordinates."
+  },
+  "future_editor_design": [
+    "Resolve effective game/mod assets, including path replacement and duplicate-name precedence, before building entity and mesh indexes; exact collision precedence still requires testing.",
+    "Keep gameplay building identity, resolved graphical spawn-point identity, entity identity, and built-in special category separate.",
+    "Preserve repeated blocks in .asset/.gfx parsing; a dictionary parser that overwrites repeated entity/pdxmesh/meshsettings keys is insufficient.",
+    "Read geometry, material references and overrides, entity scale and coordinate conventions before adding animations/particles/shader parity.",
+    "Actual model geometry can be used with an orthographic map or separate selected-model preview; restoring tilted-map interaction is not a requirement.",
+    "If unknown custom placement constraints are encountered, preserve existing records and expose unsupported rules rather than silently using ordinary random placement."
+  ],
+  "remaining_validation": [
+    "Live Nudge experiment with one custom state building, one provincial building, one shared spawn point, and missing-entity negative case.",
+    "Provincial max > 1: prior static expected-count routine does not simply multiply province count by max; keep this unresolved until live testing.",
+    "Exact mesh-variant selection, asset overrides/copy_from and mod/DLC load precedence.",
+    "DDS decoding and visual comparison of material overrides, handedness, UV orientation, entity scale, skinning and animations.",
+    "Floating-harbor parity remains partial: the previous shipped-record comparison was not a fresh live Nudge run."
+  ],
+  "primary_local_sources": [
+    "common/buildings/00_buildings.txt",
+    "common/buildings/01_landmark_buildings.txt",
+    "common/defines/00_graphics.lua",
+    "gfx/entities/buildings.asset",
+    "gfx/entities/buildings.gfx",
+    "gfx/models/buildings/floating_harbor.asset",
+    "gfx/models/buildings/floating_harbor.gfx",
+    "hoi4.exe"
+  ],
+  "public_sources": [
+    {"url": "https://github.com/ross-g/io_pdx_mesh", "role": "Author's existing Clausewitz mesh/animation import-export implementation; feasibility reference, not integrated into this project."},
+    {"url": "https://github.com/ross-g/io_pdx_mesh/blob/master/pdx_data.py", "role": "Typed binary mesh format reader and writer."},
+    {"url": "https://github.com/ross-g/io_pdx_mesh/blob/master/pdx_blender/blender_import_export.py", "role": "Coordinate-system, winding and UV conversion reference."},
+    {"url": "https://github.com/cwtools/cwtools-hoi4-config/blob/master/Config/common/buildings.cwt", "role": "Maintainer-authored schema corroborates building/spawn-point fields. Static binary/local game evidence takes precedence where the schema is incomplete."}
+  ]
+}

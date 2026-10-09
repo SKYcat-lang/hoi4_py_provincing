@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <title>HOI4 Province Painter</title>
   <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="building-editor.css" />
 </head>
 <body>
   <header id="topbar">
@@ -87,6 +88,13 @@
         </svg>
         <span>지원 편집</span>
         <span class="support-menu-chevron" aria-hidden="true">▾</span>
+      </button>
+      <span class="sep" aria-hidden="true"></span>
+      <button id="tab-buildings" class="tab-btn" title="건물 배치 편집">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M3 21h18M5 21V9l7-5 7 5v12M9 21v-6h6v6M9 10h1M14 10h1"/>
+        </svg>
+        <span>건물 편집</span>
       </button>
     </div>
 
@@ -399,6 +407,37 @@
   </div>
 
   <main id="canvas-area">
+    <canvas id="building-canvas" hidden aria-label="건물 배치 지도: 클릭 선택, 오른쪽 드래그 이동, 휠 확대"></canvas>
+    <aside id="building-panel" hidden aria-label="건물 편집 도구">
+      <div class="building-panel-heading"><strong>건물 배치</strong><small id="building-dirty">저장됨</small></div>
+      <p id="building-selection">지도 클릭으로 영역 선택 · Shift로 추가/해제</p>
+      <label class="building-filter-label">선택 단위 <select id="building-selection-mode"><option value="province">프로빈스</option><option value="state">주</option></select></label>
+      <label class="building-filter-label">건물 종류 <select id="building-filter"><option value="">전체 건물</option></select></label>
+      <div class="building-actions">
+        <button id="building-fill">누락 생성</button><button id="building-randomize">선택 영역 재배치</button>
+        <button id="building-clear-selection">영역 해제</button><button id="building-save">배치 저장</button>
+        <button id="building-undo">실행 취소</button><button id="building-redo">다시 실행</button>
+      </div>
+      <p class="building-hint">건물 클릭 → 좌표 팝업<br>오른쪽 드래그: 지도 이동 · 휠: 확대</p>
+      <p id="building-model-status" class="building-hint">높이맵 지형 · 원근 보기 · 모델 정지 자세</p>
+      <p id="building-message" role="status">생성한 배치는 저장 전에 확인할 수 있습니다.</p>
+      <details><summary>정의 및 안내</summary><button id="building-game-folder">게임 폴더 지정</button><button id="building-reload">변경 버리고 다시 읽기</button><p id="building-warnings"></p></details>
+      <div id="building-count">선택 영역 배치 0개</div>
+      <div id="building-list" aria-label="선택 영역 건물 목록"></div>
+    </aside>
+    <section id="building-popup" hidden role="dialog" aria-label="선택 건물 좌표">
+      <div class="building-popup-heading"><strong id="building-popup-title"></strong><button id="building-popup-close" aria-label="좌표 팝업 닫기">×</button></div>
+      <p id="building-popup-subtitle"></p>
+      <div class="building-axis" data-building-axis="x"><label>X <input type="number" step="0.01" aria-label="건물 X 좌표"></label><div><button data-step="minus" aria-label="X 감소">−</button><input type="range" min="-100" max="100" value="0" step="1" aria-label="X 상대 조정"><button data-step="plus" aria-label="X 증가">+</button></div></div>
+      <div class="building-axis" data-building-axis="z"><label>Z <input type="number" step="0.01" aria-label="건물 Z 좌표"></label><div><button data-step="minus" aria-label="Z 감소">−</button><input type="range" min="-100" max="100" value="0" step="1" aria-label="Z 상대 조정"><button data-step="plus" aria-label="Z 증가">+</button></div></div>
+      <div class="building-axis" data-building-axis="y"><label>높이 <input type="number" step="0.01" aria-label="건물 높이"></label><div><button data-step="minus" aria-label="높이 감소">−</button><input type="range" min="-100" max="100" value="0" step="1" aria-label="높이 상대 조정"><button data-step="plus" aria-label="높이 증가">+</button></div></div>
+      <div class="building-axis" data-building-axis="rotation"><label>회전 ° <input type="number" step="0.1" aria-label="건물 회전 각도"></label><div><button data-step="minus" aria-label="회전 감소">−</button><input type="range" min="-100" max="100" value="0" step="1" aria-label="회전 상대 조정"><button data-step="plus" aria-label="회전 증가">+</button></div></div>
+      <div class="building-popup-options"><label>조정 폭 <select id="building-step"><option value="0.01">미세</option><option value="0.1">보통</option><option value="1">크게</option></select></label><label><input id="building-auto-height" type="checkbox" checked> 지형 높이 자동</label></div>
+      <label id="building-target-row" hidden><span id="building-target-label">연결 바다 ID</span><input id="building-target" type="number" min="1" step="1"></label>
+      <label class="building-toggle"><input id="building-lock" type="checkbox"> 재배치에서 위치 고정 <small>이번 작업</small></label>
+      <p class="building-hint">슬라이더를 놓으면 새 좌표를 기준으로 중앙에 돌아옵니다.</p>
+      <p id="building-popup-error" role="status"></p>
+    </section>
     <div id="canvas-wrap">
       <canvas id="map-canvas"></canvas>
       <canvas id="heightmap-layer-canvas"></canvas>
@@ -406,6 +445,7 @@
       <canvas id="rivers-layer-canvas"></canvas>
       <canvas id="country-fill-canvas" aria-hidden="true"></canvas>
       <canvas id="province-id-colors-canvas" aria-hidden="true"></canvas>
+      <canvas id="impassable-overlay-canvas" aria-hidden="true"></canvas>
       <canvas id="supply-selection-canvas"></canvas>
       <svg id="supply-svg" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"></svg>
       <canvas id="protect-canvas"></canvas>
@@ -440,6 +480,12 @@
         <button id="layer-panel-toggle" class="layer-panel-toggle" title="패널 접기">−</button>
       </div>
       <div class="layer-panel-body" id="layer-panel-body">
+        <div class="layer-row">
+          <label class="toggle" title="통행 불가로 지정된 주에 사선 무늬를 표시합니다.">
+            <input type="checkbox" id="layer-impassable-toggle" checked />
+            <span>통행 불가 주 (사선)</span>
+          </label>
+        </div>
         <div class="layer-row">
           <label class="toggle">
             <input type="checkbox" id="layer-rivers-toggle" />
@@ -715,11 +761,15 @@
         <label><span>개발도 (state_category)</span><select id="state-category" disabled></select></label>
         <label><span>지역 보급 (local_supplies)</span><input id="state-local-supplies" type="number" min="0" step="0.1" disabled></label>
       </div>
+      <label class="toggle" title="속성 저장을 누르면 이 주 전체의 통행 불가 설정이 적용됩니다.">
+        <input id="state-impassable" type="checkbox" disabled />
+        <span>주 전체 통행 불가</span>
+      </label>
       <div class="state-resource-section">
         <strong>리소스</strong>
         <div id="state-resource-grid" class="state-resource-grid"></div>
       </div>
-      <div class="support-panel-hint">일반 속성 저장은 history를 건드리지 않습니다. 전체 원문 편집은 파일에만 저장되며 현재 지도 상태에는 즉시 반영되지 않습니다.</div>
+      <div class="support-panel-hint">속성 저장 시 통행 불가 사선이 갱신되며 history는 보존됩니다. 전체 원문 편집의 소유권·통행 불가 변경은 즉시 반영되며 기타 변경은 다시 로드해야 합니다.</div>
     </div>
 
     <div id="supply-editor-bar" class="support-bottom-panel supply-editor-panel hidden"
@@ -879,10 +929,18 @@
     </div>
   </div>
 
+  <script src="impassable-overlay.js"></script>
   <script src="province-id-colors.js"></script>
   <script src="country-border-renderer.js"></script>
   <script src="country-overlay.js"></script>
   <script src="province-search.js"></script>
+  <script src="building-nudge.js"></script>
+  <script src="building-gl.js"></script>
+  <script src="building-camera.js"></script>
+  <script src="building-terrain.js"></script>
+  <script src="building-models.js"></script>
+  <script src="building-view.js"></script>
+  <script src="building-editor.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

@@ -512,16 +512,16 @@ def test_external_files_simple_removes() -> None:
 
     tmp = tempfile.mkdtemp(prefix="hoi4test_simple_")
     try:
-        # buildings.txt: 첫 컬럼이 prov_id, 마지막이 naval target
+        # buildings.txt: 첫 컬럼이 state_id, 마지막이 port target
         bp = os.path.join(tmp, "buildings.txt")
         with open(bp, "w", encoding="utf-8") as f:
-            f.write("100;arms_factory;2900.0;9.5;1350.0;0.0;0\r\n")    # 100 제거
+            f.write("100;arms_factory;2900.0;9.5;1350.0;0.0;0\r\n")    # state 100 보존
             f.write("200;industrial_complex;2950.0;9.5;1360.0;0.0;0\r\n")  # 보존
             f.write("1;floating_harbor;2940.0;9.5;1356.0;1.5;100\r\n")  # 마지막=100 제거
         r = update_buildings_txt(bp, {100})
         with open(bp, "r", encoding="utf-8") as f:
             text = f.read()
-        T.check("buildings: 100 줄 제거", "arms_factory" not in text, text)
+        T.check("buildings: 같은 번호의 state 100 보존", "arms_factory" in text, text)
         T.check("buildings: naval target 100 줄 제거", "floating_harbor" not in text, text)
         T.check("buildings: 200 보존", "industrial_complex" in text, text)
 
@@ -639,7 +639,7 @@ def test_definition_csv_id_gap_filling() -> None:
         write_definition_csv(path, provs, set())
         with open(path, "r", encoding="utf-8") as f:
             text = f.read()
-        lines = text.strip("\r\n").split("\r\n")
+        lines = text.splitlines()
 
         T.check("총 행 수 = max_id + 1 = 1714",
                 len(lines) == 1714, str(len(lines)))
@@ -666,7 +666,7 @@ def test_definition_csv_id_gap_filling() -> None:
         write_definition_csv(path, provs2, {2})
         with open(path, "r", encoding="utf-8") as f:
             text2 = f.read()
-        lines2 = text2.strip("\r\n").split("\r\n")
+        lines2 = text2.splitlines()
         T.check("removed_ids 적용 후에도 max_id 기준 채움 (총 4행)",
                 len(lines2) == 4, str(len(lines2)))
         T.check("removed_ids 위치(2)는 placeholder로 채워짐",
@@ -686,7 +686,7 @@ def test_definition_csv_id_gap_filling() -> None:
         write_definition_csv(path, provs3, set())
         with open(path, "r", encoding="utf-8") as f:
             text3 = f.read()
-        lines3 = text3.strip("\r\n").split("\r\n")
+        lines3 = text3.splitlines()
         T.check("갭 없을 때는 placeholder 추가 안 됨",
                 len(lines3) == 3 and "0;0;0;0" not in lines3[1]
                 and "0;0;0;0" not in lines3[2], str(lines3))

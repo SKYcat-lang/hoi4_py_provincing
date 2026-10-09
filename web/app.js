@@ -175,6 +175,7 @@ const countryOverlay = new CountryOverlay(
   $('#country-overlay-canvas'), $('#country-fill-canvas'), () => state,
 );
 const provinceIdOverlay = new ProvinceIdOverlay($('#province-id-colors-canvas'), () => state);
+const impassableOverlay = new ImpassableOverlay($('#impassable-overlay-canvas'), () => state);
 const provinceSearch = new ProvinceSearch({
   form: $('#province-search-form'), input: $('#province-search-input'),
   clearButton: $('#province-search-clear'), marker: $('#province-search-marker'),
@@ -184,6 +185,16 @@ const provinceSearch = new ProvinceSearch({
   transform: applyTransform, report: setStatus,
 });
 let provinceBorderRenderer = null;
+const buildingEditor = new BuildingEditor({
+  state: () => state, base: canvas, api: () => window.pywebview.api, report: setStatus,
+  transform: applyTransform, undo, redo,
+  history: change => { state.undoStack.push(change); state.redoStack = []; updateUndoButtons(); },
+  clearHistory: () => {
+    state.undoStack = state.undoStack.filter(stroke => stroke.kind !== 'buildings');
+    state.redoStack = state.redoStack.filter(stroke => stroke.kind !== 'buildings');
+    updateUndoButtons();
+  },
+});
 let provinceBorderFrame = 0;
 const selectionGpuCanvas = $('#selection-gpu-canvas');
 let selectionOverlayRenderer = null;
@@ -1114,6 +1125,7 @@ async function deleteSelectedSupplyRailway() {
 }
 
 function applyTransform() {
+  buildingEditor.view.schedule();
   const t = `translate(${state.panX}px, ${state.panY}px) scale(${state.zoom})`;
   canvas.style.transformOrigin = '0 0';
   canvas.style.transform = t;
@@ -2287,6 +2299,7 @@ function addProvinceBorderDirtyBounds(points) {
 }
 
 function scheduleProvinceBorderRender() {
+  impassableOverlay.schedule();
   provinceIdOverlay.schedule();
   countryOverlay.schedule();
   const provinceEnabled = $('#layer-province-border-toggle')?.checked;
@@ -2299,6 +2312,7 @@ function scheduleProvinceBorderRender() {
 }
 
 function markProvinceBordersDirty(points = null) {
+  impassableOverlay.invalidate();
   provinceSearch.clear();
   provinceIdOverlay.invalidate();
   countryOverlay.invalidate();
@@ -2315,6 +2329,7 @@ function markProvinceBordersDirty(points = null) {
 }
 
 function markStateBordersDirty() {
+  impassableOverlay.invalidate();
   countryOverlay.invalidate();
   state.stateBordersDirty = true;
   state.stateBorderImageData = null;
@@ -3119,7 +3134,9 @@ async function finishSupportLassoDrag() {
 
 // ---------- 탭/모드 전환 ----------
 function setMode(name) {
-  if (!['province', 'move', 'state', 'region', 'split', 'adjacency', 'terrain', 'heightmap', 'rivers', 'supply', 'reference'].includes(name)) return;
+  if (!['province', 'move', 'state', 'region', 'split', 'adjacency', 'terrain', 'heightmap', 'rivers', 'supply', 'reference', 'buildings'].includes(name)) return;
+  if (buildingEditor.busy) return;
+  if (name === 'buildings' && !state.loaded) { setStatus('먼저 맵을 불러오세요.'); return; }
   if (name === 'terrain' && !state.terrainEditable) {
     setStatus('8비트 인덱스 terrain.bmp를 로드해야 지형 편집을 사용할 수 있습니다.');
     return;
@@ -3142,6 +3159,8 @@ function setMode(name) {
     state.tool = 'brush';
   }
   state.mode = name;
+  $('#tab-buildings').classList.toggle('active', name === 'buildings');
+  buildingEditor.setActive(name === 'buildings');
   syncPaintToolButtons();
   $('#tab-province').classList.toggle('active', name === 'province');
   $('#tab-state').classList.toggle('active', name === 'state');
@@ -3314,6 +3333,7 @@ function setMode(name) {
     rivers: '강 편집',
     supply: '보급허브와 철도 편집',
     reference: '이미지 레이어 선택·자유 변형',
+    buildings: '건물 배치 편집',
   };
   setStatus(`모드: ${labels[name]}`);
 }
@@ -3832,7 +3852,7 @@ const BASE_STATE_RESOURCES = [
 
 function setStatePropertiesEnabled(enabled) {
   for (const selector of [
-    '#state-manpower', '#state-category', '#state-local-supplies',
+    '#state-manpower', '#state-category', '#state-local-supplies', '#state-impassable',
     '#btn-state-properties-save', '#btn-state-history-open',
   ]) {
     const element = $(selector);
@@ -3890,6 +3910,7 @@ function renderStateCategoryOptions(currentCategory = '') {
 }
 
 function clearStatePropertiesEditor(message = '캔버스에서 스테이트를 선택하세요.') {
+  $('#state-impassable').checked = false;
   state.loadedStatePropertiesId = null;
   const selection = $('#state-editor-selection');
   if (selection) selection.textContent = message;
@@ -3931,9 +3952,19 @@ async function loadSelectedStateProperties() {
   $('#state-editor-selection').textContent = `${selected ? selected.name : '스테이트'} (ID ${requestedId})`;
   $('#state-manpower').value = String(result.manpower ?? 0);
   $('#state-local-supplies').value = String(result.localSupplies ?? 0);
+  $('#state-impassable').checked = Boolean(result.impassable);
+  updateStateImpassable(requestedId, result.impassable);
   renderStateCategoryOptions(result.stateCategory || '');
   renderStateResourceFields(result.resources || {});
   setStatePropertiesEnabled(true);
+}
+
+function updateStateImpassable(stateId, impassable) {
+  const selected = state.stateById.get(stateId);
+  if (!selected || selected.impassable === Boolean(impassable)) return;
+  selected.impassable = Boolean(impassable);
+  impassableOverlay.invalidate();
+  impassableOverlay.schedule();
 }
 
 async function saveSelectedStateProperties() {
@@ -3953,13 +3984,18 @@ async function saveSelectedStateProperties() {
       $('#state-category').value,
       resources,
       Math.max(0, Number($('#state-local-supplies').value) || 0),
+      $('#state-impassable').checked,
     );
     if (!result || !result.ok) {
       setStatus(`스테이트 속성 저장 실패: ${result ? result.error : 'unknown'}`);
       return;
     }
     setStatus(`스테이트 ${stateId} 속성 저장 완료 · history 블록은 그대로 보존됨`);
-    renderStateResourceFields(result.resources || {});
+    updateStateImpassable(stateId, result.impassable);
+    if (state.loadedStatePropertiesId === stateId) {
+      $('#state-impassable').checked = Boolean(result.impassable);
+      renderStateResourceFields(result.resources || {});
+    }
   } catch (error) {
     setStatus(`스테이트 속성 저장 실패: ${error && error.message ? error.message : error}`);
   } finally {
@@ -4087,9 +4123,11 @@ async function saveStateHistoryEditor() {
     $('#state-history-editor').value = result.source;
     const editedState = state.stateById.get(stateId);
     if (editedState) editedState.owner = result.owner;
+    updateStateImpassable(stateId, result.impassable);
+    await loadSelectedStateProperties();
     countryOverlay.invalidate();
     countryOverlay.schedule();
-    setStatus(`스테이트 ${stateId} 전체 코드 저장 완료 · 국가 소유권 반영 · 기타 변경은 다시 로드 · UTF-8 BOM 없음`);
+    setStatus(`스테이트 ${stateId} 전체 코드 저장 완료 · 소유권·통행 불가 반영 · 기타 변경은 다시 로드 · UTF-8 BOM 없음`);
   } catch (error) {
     setStatus(`전체 코드 저장 실패: ${error && error.message ? error.message : error}`);
   } finally {
@@ -4594,6 +4632,7 @@ async function finishProvinceMoveDrag() {
 
 function onMouseDown(e) {
   if (!state.loaded) return;
+  if (state.mode === 'buildings') return;
   const [x, y] = screenToPixel(e.clientX, e.clientY);
 
   // 월경지 마커가 표시 중이면, 어떤 클릭이든 (좌/우 모두) 마커만 지우고 끝.
@@ -5254,11 +5293,21 @@ function updateProvinceCountLabel(count) {
 
 // ---------- Undo/Redo ----------
 async function undo() {
-  if (state.historyBusy) return;
+  if (state.historyBusy || buildingEditor.busy) return;
   if (state.supportLassoDrawing || state.supportLassoDrag ||
       state.supportLassoSelectedPixels.length) clearSupportLasso();
   const stroke = state.undoStack.pop();
   if (!stroke) return;
+  if (stroke.kind === 'buildings') {
+    state.historyBusy = true;
+    try {
+      const result = await buildingEditor.restore(stroke.before);
+      if (!result.ok) throw new Error(result.error);
+      state.redoStack.push(stroke);
+    } catch (error) { state.undoStack.push(stroke); setStatus(`건물 실행 취소 실패: ${error.message}`); }
+    finally { state.historyBusy = false; updateUndoButtons(); }
+    return;
+  }
   if (stroke.kind === 'supply_hub_add' || stroke.kind === 'supply_hub_delete') {
     state.historyBusy = true;
     updateUndoButtons();
@@ -5436,11 +5485,21 @@ async function undo() {
 }
 
 async function redo() {
-  if (state.historyBusy) return;
+  if (state.historyBusy || buildingEditor.busy) return;
   if (state.supportLassoDrawing || state.supportLassoDrag ||
       state.supportLassoSelectedPixels.length) clearSupportLasso();
   const stroke = state.redoStack.pop();
   if (!stroke) return;
+  if (stroke.kind === 'buildings') {
+    state.historyBusy = true;
+    try {
+      const result = await buildingEditor.restore(stroke.after);
+      if (!result.ok) throw new Error(result.error);
+      state.undoStack.push(stroke);
+    } catch (error) { state.redoStack.push(stroke); setStatus(`건물 다시 실행 실패: ${error.message}`); }
+    finally { state.historyBusy = false; updateUndoButtons(); }
+    return;
+  }
   if (stroke.kind === 'supply_hub_add' || stroke.kind === 'supply_hub_delete') {
     state.historyBusy = true;
     updateUndoButtons();
@@ -5669,6 +5728,8 @@ function updateUndoButtons() {
 
 // ---------- 초기 로드 ----------
 async function onOpenClick() {
+  if (buildingEditor.busy) return;
+  if (buildingEditor.dirty && !(await buildingEditor.save())) return;
   setStatus('폴더 선택 중...');
   const result = await window.pywebview.api.pick_map_folder();
   if (!result || !result.ok) {
@@ -5683,8 +5744,11 @@ async function onOpenClick() {
 }
 
 async function applyLoadedMap(result) {
+  buildingEditor.reset();
   provinceSearch.clear();
   state.loaded = false;
+  impassableOverlay.invalidate();
+  impassableOverlay.schedule();
   provinceIdOverlay.invalidate();
   provinceIdOverlay.schedule();
   countryOverlay.invalidate();
@@ -5952,6 +6016,7 @@ async function applyLoadedMap(result) {
   refreshProvinceBorders();
   countryOverlay.schedule();
   provinceIdOverlay.schedule();
+  impassableOverlay.schedule();
   updateUndoButtons();
   updateSelectedStateLabel();
 
@@ -6169,6 +6234,7 @@ async function confirmStateCreate() {
 // ---------- 저장 ----------
 async function onSaveClick() {
   if (!state.loaded) return;
+  if (buildingEditor.busy || state.historyBusy) return;
   setStatus('저장 미리보기 분석 중...');
   const preview = await window.pywebview.api.preview_save();
   if (!preview || !preview.ok) {
@@ -6179,6 +6245,7 @@ async function onSaveClick() {
 
   // 다이얼로그 채우기
   const supportFiles = [];
+  if (preview.buildingsDirty) supportFiles.push('buildings.txt');
   if (preview.terrainDirty) supportFiles.push('terrain.bmp');
   if (preview.heightmapDirty) supportFiles.push('heightmap.bmp');
   if (preview.riversDirty) supportFiles.push('rivers.bmp');
@@ -6239,19 +6306,34 @@ async function onSaveConfirm() {
   const r = await window.pywebview.api.commit_save(typeOverrides, stateAssignments);
   $('#save-dialog').classList.add('hidden');
   if (r && r.ok) {
+    buildingEditor.reset();
+    state.undoStack = state.undoStack.filter(stroke => stroke.kind !== 'buildings');
+    state.redoStack = state.redoStack.filter(stroke => stroke.kind !== 'buildings');
+    updateUndoButtons();
     const extraExt = (r.modifiedExternalFiles && r.modifiedExternalFiles.length) || 0;
     const terrainSaved = r.terrainSaved ? ' / terrain.bmp 저장' : '';
     const heightmapSaved = r.heightmapSaved ? ' / heightmap.bmp 저장' : '';
     const riversSaved = r.riversSaved ? ' / rivers.bmp 저장' : '';
     const supplySaved = r.supplySaved ? ' / 보급망 저장' : '';
-    let msg = `저장 완료: 새 ${r.newProvinceCount}개 / 삭제 ${r.removedProvinceCount}개 / state ${r.modifiedStateFiles.length} / region ${r.modifiedRegionFiles.length} / 외부 파일 ${extraExt}${terrainSaved}${heightmapSaved}${riversSaved}${supplySaved}`;
+    const buildingsSaved = r.buildingsSaved ? ' / 건물 배치 저장' : '';
+    let msg = `저장 완료: 새 ${r.newProvinceCount}개 / 삭제 ${r.removedProvinceCount}개 / state ${r.modifiedStateFiles.length} / region ${r.modifiedRegionFiles.length} / 외부 파일 ${extraExt}${terrainSaved}${heightmapSaved}${riversSaved}${supplySaved}${buildingsSaved}`;
     setStatus(msg);
     // 카운터 갱신 (백엔드가 정확한 라이브 카운트를 반환)
     if (typeof r.liveProvinceCount === 'number') {
       updateProvinceCountLabel(r.liveProvinceCount);
     }
     // 보호 색상/룩업/할당 갱신
-    for (const p of state.newProvincesPreview) {
+    for (const provinceId of r.removedProvinceIds || []) {
+      const rgb = state.provinceRgbById.get(provinceId);
+      if (rgb) {
+        const key = rgb.join(',');
+        state.rgbToProvinceId.delete(key);
+        state.lakeRgbSet.delete(key);
+        state.seaRgbSet.delete(key);
+      }
+      state.provinceRgbById.delete(provinceId);
+    }
+    for (const p of r.newProvinces || []) {
       const rgbStr = p.rgb.join(',');
       const t = (typeOverrides[rgbStr]) || p.type;
       const k = rgbKey(p.rgb[0], p.rgb[1], p.rgb[2]);
@@ -6272,6 +6354,7 @@ async function onSaveConfirm() {
     if (Array.isArray(r.regionAssignments)) {
       state.regionAssignments = new Map(r.regionAssignments);
     }
+    if (state.mode === 'buildings') await buildingEditor.setActive(true);
     provinceIdOverlay.invalidate();
     provinceIdOverlay.schedule();
     // 할당 맵 캐시 무효화 (탭 다시 들어가면 재구성)
@@ -6383,6 +6466,7 @@ async function generateWorldNormalNow() {
 window.addEventListener('pywebviewready', () => {
   $('#btn-open').addEventListener('click', onOpenClick);
   $('#btn-overlay-bmp').addEventListener('click', onOverlayBmpClick);
+  $('#layer-impassable-toggle').addEventListener('change', () => impassableOverlay.schedule());
   $('#btn-pick-color').addEventListener('click', onPickColorClick);
   $('#btn-apply-province-rgb').addEventListener('click', applyManualProvinceRgb);
   document.querySelectorAll('.province-rgb-input').forEach(input => {
@@ -6435,6 +6519,7 @@ window.addEventListener('pywebviewready', () => {
   $('#tab-rivers').addEventListener('click', () => setMode('rivers'));
   $('#tab-supply').addEventListener('click', () => setMode('supply'));
   $('#tab-reference').addEventListener('click', () => setMode('reference'));
+  $('#tab-buildings').addEventListener('click', () => setMode('buildings'));
   const provinceToolMenuButton = $('#btn-province-tools');
   const provinceToolMenu = $('#province-tool-menu');
   provinceToolMenuButton.addEventListener('click', event => {

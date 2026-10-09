@@ -1,0 +1,200 @@
+[
+  {
+    "function": "0x1414df9b0",
+    "range": [
+      "0x1414dfcd6",
+      "0x1414dfd02"
+    ],
+    "instructions": [
+      "00000001414dfcd6 cmp       r8d, 0x4417",
+      "00000001414dfcdd je        0x1414dfcf6",
+      "00000001414dfcdf cmp       r8d, 0x4dae",
+      "00000001414dfce6 jne       0x1414dfd10",
+      "00000001414dfce8 lea       rdx, [rcx + 0x13]",
+      "00000001414dfcec mov       rcx, rdi",
+      "00000001414dfcef call      0x1424c0c00",
+      "00000001414dfcf4 jmp       0x1414dfd10",
+      "00000001414dfcf6 lea       rdx, [rcx + 0x20]",
+      "00000001414dfcfa mov       rcx, rdi",
+      "00000001414dfcfd call      0x1424c0c00"
+    ]
+  },
+  {
+    "function": "0x141b4e460",
+    "range": [
+      "0x141b4e5a0",
+      "0x141b4e5cf"
+    ],
+    "instructions": [
+      "0000000141b4e5a0 mov       ecx, dword ptr [rcx]",
+      "0000000141b4e5a2 mov       dword ptr [rsp + 0x50], ecx",
+      "0000000141b4e5a6 mov       rbx, qword ptr [rsp + 0x68]",
+      "0000000141b4e5ab mov       rax, qword ptr [rbx + 8]",
+      "0000000141b4e5af mov       qword ptr [rsp + 0x60], rax",
+      "0000000141b4e5b4 cmp       byte ptr [rax + 0x20], 0",
+      "0000000141b4e5b8 jne       0x141b4ec88",
+      "0000000141b4e5be mov       r9, rax",
+      "0000000141b4e5c1 mov       r8d, ecx",
+      "0000000141b4e5c4 mov       rdx, r13",
+      "0000000141b4e5c7 mov       rcx, rsi",
+      "0000000141b4e5ca call      0x1416707d0"
+    ]
+  },
+  {
+    "function": "0x141b4e460",
+    "range": [
+      "0x141b4e79a",
+      "0x141b4e7fa"
+    ],
+    "instructions": [
+      "0000000141b4e79a mov       r15, qword ptr [rbp + 0x68]",
+      "0000000141b4e79e mov       r12d, dword ptr [rbp + 0x58]",
+      "0000000141b4e7a2 mov       rsi, qword ptr [rsp + 0x58]",
+      "0000000141b4e7a7 mov       ebx, dword ptr [rsp + 0x40]",
+      "0000000141b4e7ab mov       ecx, ebx",
+      "0000000141b4e7ad sub       ecx, eax",
+      "0000000141b4e7af test      ecx, ecx",
+      "0000000141b4e7b1 jle       0x141b4e980",
+      "0000000141b4e7b7 mov       ebx, ecx",
+      "0000000141b4e7b9 mov       qword ptr [rsp + 0x48], rbx",
+      "0000000141b4e7be jmp       0x141b4e7c3",
+      "0000000141b4e7c0 xor       r8d, r8d",
+      "0000000141b4e7c3 mov       dword ptr [rsp + 0x40], r8d",
+      "0000000141b4e7c8 mov       eax, r12d",
+      "0000000141b4e7cb inc       r12d",
+      "0000000141b4e7ce mov       dword ptr [rbp + 0x58], r12d",
+      "0000000141b4e7d2 lea       rcx, [rsp + 0x40]",
+      "0000000141b4e7d7 mov       qword ptr [rsp + 0x28], rcx",
+      "0000000141b4e7dc mov       dword ptr [rsp + 0x20], eax",
+      "0000000141b4e7e0 mov       r9, r13",
+      "0000000141b4e7e3 mov       r8, qword ptr [rsp + 0x60]",
+      "0000000141b4e7e8 mov       edx, dword ptr [rsp + 0x50]",
+      "0000000141b4e7ec mov       rcx, rsi",
+      "0000000141b4e7ef call      0x14166fba0",
+      "0000000141b4e7f4 mov       r12, rax",
+      "0000000141b4e7f7 test      rax, rax"
+    ]
+  },
+  {
+    "function": "0x1416707d0",
+    "range": [
+      "0x14167084f",
+      "0x14167088e"
+    ],
+    "instructions": [
+      "000000014167084f cmp       byte ptr [r11 + 0x12], 0",
+      "0000000141670854 mov       rdi, qword ptr [rsp + 0x18]",
+      "0000000141670859 jne       0x141670864",
+      "000000014167085b cmp       ebx, 1",
+      "000000014167085e je        0x141670864",
+      "0000000141670860 xor       cl, cl",
+      "0000000141670862 jmp       0x141670866",
+      "0000000141670864 mov       cl, 1",
+      "0000000141670866 cmp       dword ptr [r11 + 0x1c], 1",
+      "000000014167086b je        0x141670883",
+      "000000014167086d cmp       ebx, 1",
+      "0000000141670870 je        0x141670883",
+      "0000000141670872 mov       eax, dword ptr [r11 + 0x14]",
+      "0000000141670876 test      cl, cl",
+      "0000000141670878 je        0x14167088c",
+      "000000014167087a cmp       r8d, eax",
+      "000000014167087d cmovl     eax, r8d",
+      "0000000141670881 pop       rbx",
+      "0000000141670882 ret       ",
+      "0000000141670883 test      cl, cl",
+      "0000000141670885 cmovne    r10d, r8d",
+      "0000000141670889 mov       eax, r10d",
+      "000000014167088c pop       rbx",
+      "000000014167088d ret       "
+    ]
+  },
+  {
+    "function": "0x140a60f10",
+    "range": [
+      "0x140a60f24",
+      "0x140a60f4f"
+    ],
+    "instructions": [
+      "0000000140a60f24 mov       rbx, qword ptr [rcx + 0x178]",
+      "0000000140a60f2b movaps    xmm4, xmm1",
+      "0000000140a60f2e subss     xmm4, dword ptr [rip + 0x1cbed1e] ; [0x14271fc54] float=0.5",
+      "0000000140a60f36 movaps    xmm5, xmm2",
+      "0000000140a60f39 xor       esi, esi",
+      "0000000140a60f3b subss     xmm5, dword ptr [rip + 0x1cbed11] ; [0x14271fc54] float=0.5",
+      "0000000140a60f43 movzx     ebp, r9b",
+      "0000000140a60f47 cvttss2si edi, xmm4",
+      "0000000140a60f4b cvttss2si edx, xmm5"
+    ]
+  },
+  {
+    "function": "0x140a60f10",
+    "range": [
+      "0x140a60ff2",
+      "0x140a61032"
+    ],
+    "instructions": [
+      "0000000140a60ff2 subss     xmm2, xmm1",
+      "0000000140a60ff6 mulss     xmm2, xmm4",
+      "0000000140a60ffa addss     xmm2, xmm1",
+      "0000000140a60ffe movd      xmm1, eax",
+      "0000000140a61002 cvtdq2ps  xmm1, xmm1",
+      "0000000140a61005 subss     xmm1, xmm3",
+      "0000000140a61009 mulss     xmm1, xmm4",
+      "0000000140a6100d addss     xmm1, xmm3",
+      "0000000140a61011 subss     xmm1, xmm2",
+      "0000000140a61015 mulss     xmm1, xmm5",
+      "0000000140a61019 addss     xmm1, xmm2",
+      "0000000140a6101d mulss     xmm1, dword ptr [rip + 0x1cbec2b] ; [0x14271fc50] float=0.1",
+      "0000000140a61025 test      bpl, bpl",
+      "0000000140a61028 je        0x140a61032",
+      "0000000140a6102a maxss     xmm1, dword ptr [rip + 0x1edcfe2] ; [0x14293e014] float=9.5"
+    ]
+  },
+  {
+    "function": "0x141670a80",
+    "range": [
+      "0x141670df1",
+      "0x141670e0e"
+    ],
+    "instructions": [
+      "0000000141670df1 movzx     eax, byte ptr [r8 + 0xd2]",
+      "0000000141670df9 test      al, 1",
+      "0000000141670dfb je        0x14167114d",
+      "0000000141670e01 test      r14b, r14b",
+      "0000000141670e04 je        0x141670e0e",
+      "0000000141670e06 test      al, 8",
+      "0000000141670e08 je        0x14167114d"
+    ]
+  },
+  {
+    "function": "0x141670a80",
+    "range": [
+      "0x141671025",
+      "0x141671073"
+    ],
+    "instructions": [
+      "0000000141671025 movzx     edx, byte ptr [rsp + 0x31]",
+      "000000014167102a test      dl, dl",
+      "000000014167102c je        0x141671040",
+      "000000014167102e mov       rax, qword ptr [rax + 0xb8]",
+      "0000000141671035 test      byte ptr [rax + 0xd2], 3",
+      "000000014167103c je        0x141671073",
+      "000000014167103e jmp       0x141671055",
+      "0000000141671040 mov       rcx, qword ptr [rax + 0xc0]",
+      "0000000141671047 test      rcx, rcx",
+      "000000014167104a je        0x141671069",
+      "000000014167104c mov       eax, dword ptr [r13 + 0x58]",
+      "0000000141671050 cmp       dword ptr [rcx + 0x58], eax",
+      "0000000141671053 jne       0x141671069",
+      "0000000141671055 inc       rsi",
+      "0000000141671058 cmp       rsi, 8",
+      "000000014167105c jl        0x141670ed0",
+      "0000000141671062 jmp       0x14167106f",
+      "0000000141671064 movzx     edx, byte ptr [rsp + 0x31]",
+      "0000000141671069 cmp       byte ptr [rbp + 0x6f], 0",
+      "000000014167106d je        0x1416710c7",
+      "000000014167106f test      dl, dl",
+      "0000000141671071 jne       0x1416710c7"
+    ]
+  }
+]

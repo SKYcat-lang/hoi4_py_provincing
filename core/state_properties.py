@@ -17,6 +17,7 @@ class StateProperties:
     state_category: str
     resources: dict[str, int]
     local_supplies: float
+    impassable: bool = False
 
 
 @dataclass(frozen=True)
@@ -121,13 +122,9 @@ def _entries(text: str) -> tuple[dict[str, _Entry], int, int]:
                 index += 1
             value_end = index
         else:
-            line_end = text.find("\n", index, body_end)
-            if line_end < 0:
-                line_end = body_end
-            comment = text.find("#", index, line_end)
-            value_end = comment if comment >= 0 else line_end
-            while value_end > value_start and text[value_end - 1].isspace():
-                value_end -= 1
+            value_end = index
+            while value_end < body_end and not text[value_end].isspace() and text[value_end] not in "#{}":
+                value_end += 1
         line_start = text.rfind("\n", body_start, entry_start) + 1
         entries[key] = _Entry(
             key=key,
@@ -156,6 +153,12 @@ def _parse_resources(raw: str) -> dict[str, int]:
     return resources
 
 
+def parse_state_impassable(text: str) -> bool:
+    """Read only the direct state flag, ignoring comments and nested history."""
+    entries, _, _ = _entries(text)
+    return _plain_value(text, entries.get("impassable"), "no") == "yes"
+
+
 def read_state_properties(path: str) -> StateProperties:
     text = _read_text(path)
     entries, _, _ = _entries(text)
@@ -174,6 +177,7 @@ def read_state_properties(path: str) -> StateProperties:
         state_category=category,
         resources=resources,
         local_supplies=local_supplies,
+        impassable=parse_state_impassable(text),
     )
 
 
@@ -249,7 +253,10 @@ def update_state_properties(
     state_category: str,
     resources: dict[str, int],
     local_supplies: float,
+    impassable: bool | None = None,
 ) -> StateProperties:
+    if impassable is not None and not isinstance(impassable, bool):
+        raise ValueError("통행 불가 설정은 참 또는 거짓이어야 합니다.")
     manpower = int(manpower)
     local_supplies = float(local_supplies)
     category = str(state_category).strip()
@@ -294,6 +301,8 @@ def update_state_properties(
         "resources": line_ending.join(resource_lines),
         "local_supplies": _format_number(local_supplies),
     }
+    if impassable is not None:
+        values["impassable"] = "yes" if impassable else "no"
 
     replacements: list[tuple[int, int, str]] = []
     missing: list[tuple[str, str]] = []
@@ -311,6 +320,8 @@ def update_state_properties(
         entries, _, body_end = _entries(text)
         anchor = entries.get("history") or entries.get("provinces")
         insert_at = anchor.line_start if anchor else body_end
+        if anchor and text[anchor.line_start:anchor.entry_start].strip():
+            insert_at = anchor.entry_start
         block = "".join(
             f"{top_indent}{key} = {value}{line_ending}"
             for key, value in missing
@@ -325,4 +336,5 @@ def update_state_properties(
         state_category=category,
         resources=normalized_resources,
         local_supplies=local_supplies,
+        impassable=parse_state_impassable(text),
     )

@@ -1,0 +1,14 @@
+{
+  "map_size": [
+    2048,
+    1024
+  ],
+  "provinces": 512,
+  "states": 64,
+  "types": 12,
+  "records": 4608,
+  "randomized": 4608,
+  "initialization_seconds": 0.08404599999994389,
+  "generation_seconds": 4.218393700000888,
+  "randomization_seconds": 1.445747499999925
+}

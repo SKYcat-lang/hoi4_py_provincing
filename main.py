@@ -14,6 +14,7 @@ import numpy as np
 import webview
 
 from core.color_pool import ColorPool
+from core.building_api import BuildingApi
 from core.country_colors import load_country_colors
 from core.province_locator import locate_province
 from core.definitions import (
@@ -90,6 +91,7 @@ from core.state_creator import create_state as create_state_files
 from core.state_ownership import parse_state_owner
 from core.state_neighbors import rank_adjacent_states
 from core.state_properties import (
+    parse_state_impassable,
     read_state_history_block,
     read_state_properties,
     read_state_source,
@@ -157,10 +159,12 @@ def _state_color_from_id(sid: int) -> tuple[int, int, int]:
     return (r, g, b)
 
 
-class Api:
+class Api(BuildingApi):
     """JS ↔ Python Bridge."""
 
     def __init__(self) -> None:
+        self._building_editor = None
+        self._building_game_root = ''
         self.paths: Optional[MapPaths] = None
         self.provinces_arr: Optional[np.ndarray] = None
         # disk_provinces_arr: 마지막 로드/저장 시점의 BMP 스냅샷.
@@ -221,6 +225,7 @@ class Api:
         with self._lock:
             try:
                 paths = find_map_paths(folder)
+                self._building_editor = None
                 self.paths = paths
 
                 self.provinces_arr = load_provinces_bmp(paths.provinces_bmp)
@@ -351,6 +356,7 @@ class Api:
                             "id": s.id,
                             "name": s.name,
                             "owner": s.owner,
+                            "impassable": s.impassable,
                             "fileName": os.path.basename(s.file_path),
                             "color": list(_state_color_from_id(s.id)),
                             "provinceCount": len(s.province_ids),
@@ -1342,6 +1348,7 @@ class Api:
                 "stateCategory": props.state_category,
                 "resources": props.resources,
                 "localSupplies": props.local_supplies,
+                "impassable": props.impassable,
                 "stateCategoryNames": self.state_category_names,
                 "resourceNames": self.resource_names,
             }
@@ -1391,6 +1398,7 @@ class Api:
                     "id": state_info.id,
                     "name": state_info.name,
                     "owner": state_info.owner,
+                    "impassable": state_info.impassable,
                     "fileName": os.path.basename(state_info.file_path),
                     "color": list(_state_color_from_id(state_info.id)),
                     "provinceCount": 0,
@@ -1410,6 +1418,7 @@ class Api:
         state_category: str,
         resources: dict | None,
         local_supplies: float,
+        impassable: bool | None = None,
     ) -> dict:
         """스테이트 최상위 속성을 저장하되 history 내용은 그대로 보존한다."""
         try:
@@ -1424,7 +1433,9 @@ class Api:
                 state_category=category,
                 resources=resources or {},
                 local_supplies=float(local_supplies),
+                impassable=impassable,
             )
+            state.impassable = props.impassable
             return {
                 "ok": True,
                 "stateId": sid,
@@ -1432,6 +1443,7 @@ class Api:
                 "stateCategory": props.state_category,
                 "resources": props.resources,
                 "localSupplies": props.local_supplies,
+                "impassable": props.impassable,
             }
         except (OSError, TypeError, ValueError) as exc:
             return {"ok": False, "error": str(exc)}
@@ -1510,7 +1522,15 @@ class Api:
                 raise ValueError(f"존재하지 않는 스테이트 ID입니다: {sid}")
             saved = write_state_source(target.file_path, source)
             target.owner = parse_state_owner(saved)
-            return {"ok": True, "stateId": sid, "source": saved, "owner": target.owner}
+            try:
+                target.impassable = parse_state_impassable(saved)
+            except ValueError:
+                # The source editor deliberately permits unfinished script.
+                target.impassable = False
+            return {
+                "ok": True, "stateId": sid, "source": saved,
+                "owner": target.owner, "impassable": target.impassable,
+            }
         except (OSError, TypeError, ValueError) as exc:
             return {"ok": False, "error": str(exc)}
 
@@ -1900,6 +1920,7 @@ class Api:
             "heightmapDirty": self.heightmap_dirty,
             "riversDirty": self.rivers_dirty,
             "supplyDirty": self.supply_dirty,
+            "buildingsDirty": bool(self._building_editor and self._building_editor.document.dirty),
             "newProvinces": [
                 {
                     "id": p.id,
@@ -1974,6 +1995,7 @@ class Api:
                     )
 
             # 1) provinces.bmp / terrain.bmp 저장
+            buildings_saved = self._save_buildings_with_map()
             write_provinces_bmp(self.provinces_arr, self.paths.provinces_bmp)
             terrain_saved = False
             if self.terrain_dirty:
@@ -2025,10 +2047,8 @@ class Api:
             # === 부모 기반 상속 ===
             # 새 프로빈스마다 (가장 많이 잡아먹은 옛 RGB) → 그 부모 프로빈스 → state/region 상속
             # 부모를 못 찾으면 인접 기반으로 폴백.
-            _new_ids = {nprov.id for nprov in new_provs}
-            existing_by_rgb_for_inherit = {
-                p.rgb: p for p in self.provinces if p.id not in _new_ids
-            }
+            # Fully repainted parents still supply state/region membership.
+            existing_by_rgb_for_inherit = _existing_by_rgb_for_build
 
             def _resolve_parent(new_rgb_tuple):
                 return self._pick_parent_province(new_rgb_tuple, existing_by_rgb_for_inherit)
@@ -2055,6 +2075,12 @@ class Api:
                     parent_state = self.assignments.get(parent.id)
                     if parent_state is not None:
                         self.assignments[p.id] = parent_state
+                if p.id not in self.assignments and p.type == 'land':
+                    neighbor_state = pick_neighbor_area_id(
+                        p.rgb, adjacency, province_by_rgb, self.assignments,
+                    )
+                    if neighbor_state is not None:
+                        self.assignments[p.id] = neighbor_state
 
             # self.assignments 전체를 기준으로 각 state 파일을 재구성
             # state별 현재 매핑 → 비교해서 (추가/제거) 산출
@@ -2130,6 +2156,8 @@ class Api:
                         }
 
             # color pool 갱신
+            self.assignments = {pid: sid for pid, sid in self.assignments.items() if pid not in removed_ids}
+            self.region_assignments = {pid: rid for pid, rid in self.region_assignments.items() if pid not in removed_ids}
             self.color_pool = ColorPool(p.rgb for p in self.provinces)
 
             # 부모 카운터 리셋 (저장 완료된 프로빈스의 부모 기록은 더 이상 의미 없음)
@@ -2142,8 +2170,9 @@ class Api:
             # X-crossing 전체 스캔 (저장 시점)
             xcoords = find_all_xcrossings(self.provinces_arr, max_results=2000)
 
-            # buildings.txt 자동 추가는 의도적으로 제거됨.
-            # 게임이 buildings를 자동 관리하므로 손대지 않는 것이 안전함.
+            # Building placements are explicitly managed by the building editor.
+            # Map topology changes invalidate its coordinate index and source snapshot.
+            self._building_editor = None
 
             # 라이브 프로빈스 카운트 (한도 카운터 갱신용)
             live_used = find_used_colors(self.provinces_arr)
@@ -2163,6 +2192,7 @@ class Api:
                 "provincesBmp": self.paths.provinces_bmp,
                 "terrainBmp": self.paths.terrain_bmp if terrain_saved else None,
                 "terrainSaved": terrain_saved,
+                "buildingsSaved": buildings_saved,
                 "heightmapBmp": self.paths.heightmap_bmp if heightmap_saved else None,
                 "heightmapSaved": heightmap_saved,
                 "riversBmp": self.paths.rivers_bmp if rivers_saved else None,
@@ -2172,6 +2202,10 @@ class Api:
                 "supplySaved": supply_saved,
                 "definitionCsv": self.paths.definition_csv,
                 "newProvinceCount": len(new_provs),
+                "newProvinces": [
+                    {"id": p.id, "rgb": list(p.rgb), "type": p.type} for p in new_provs
+                ],
+                "removedProvinceIds": sorted(removed_ids),
                 "removedProvinceCount": len(removed_ids),
                 "modifiedStateFiles": modified_state_files,
                 "modifiedRegionFiles": modified_region_files,

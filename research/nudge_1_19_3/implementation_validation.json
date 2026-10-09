@@ -1,0 +1,44 @@
+{
+  "date": "2026-10-10",
+  "scope": "Nudge-style template/model resolution, placement optimization and perspective terrain preview. Original game/mod files and executable were not edited.",
+  "model_scale_fix": {
+    "formula": "effective scale = inherited entity.scale * pdxmesh.scale",
+    "previous_bug": "The initial preview applied only entity.scale.",
+    "vanilla_example": "gfx/entities/buildings.gfx:144: building_rocket_site has scale=0.1; omitting it makes the geometry ten times too large.",
+    "materials": "Embedded diffuse references, named/indexed meshsettings overrides, mesh-relative paths and unambiguous shared texture basenames. Duplicate basename conflicts are reported.",
+    "shared_texture_example": "rocket_site.mesh uses v2_rocket_launchsite_diffuse.dds from gfx/models/units/planes."
+  },
+  "view": {
+    "camera": "Perspective, 45-degree vertical field of view, 50-degree inclination from vertical. Near/bottom terrain appears wider than far/top terrain.",
+    "terrain": "Current in-memory heightmap, bilinear values multiplied by 0.1 and clamped to minimum 9.5; adaptive visible grid capped at 512 divisions per axis.",
+    "models": "Same world coordinates, camera and depth buffer as terrain; record Y plus rotated/scaled mesh vertices.",
+    "interaction": "CPU perspective projection and ray-heightfield intersection, cursor-anchored zoom/pan, model projected bounds for selection, coordinate popup and spring sliders retained.",
+    "fallback": "Missing heightmap uses a flat plane; unavailable WebGL2 uses position markers and the flat editor."
+  },
+  "performance": {
+    "artifacts": ["performance_before.json", "performance_after.json", "parallel_generation_review.json"],
+    "fixture": "2048x1024 synthetic map, 512 provinces, 64 states, 12 types, 4608 generated records. Same seeded workload before/after; algorithms also updated toward recovered Nudge neighborhood rules.",
+    "before_seconds": {"generation": 4.2183937, "randomization": 1.4457475},
+    "after_seconds": {"generation": 0.5763945, "randomization": 0.1193989},
+    "changes": ["One lazy map-run bounds index instead of full-map scans per province", "Reuse interior/coastal candidates", "Index existing records and state counts", "Lazy model/texture loading and GPU instanced rendering"],
+    "thread_test": "4608 warm candidate calls: serial 0.0622 seconds, 8-worker thread pool 0.1139 seconds. Candidate results matched apart from generated IDs.",
+    "decision": "Keep generation on CPU with vectorized/cache reuse. Use GPU for terrain/models. Per-building threads were slower in the measured workload; GPU compute and process pools were not implemented.",
+    "caveat": "These are local editor measurements, not a live original-Nudge comparison or an end-to-end full-world timing."
+  },
+  "verification": {
+    "python_unittest": "95 tests passed",
+    "legacy_core_suite": "187/187 checks passed (PYTHONIOENCODING=utf-8 required for console checkmarks)",
+    "javascript_unit": "9 camera/coordinate-slider tests passed",
+    "browser_building_ui": "Passed model pixel rendering, coordinate edits, undo/redo, save, new province inheritance/selection/generation, and state selection.",
+    "browser_terrain_ui": "Passed nonflat terrain, underground-model occlusion, above-ground visibility, cursor-anchored zoom and native factory/port/rocket model rendering.",
+    "native_assets": "131 building .mesh files decoded and geometry attributes/indices checked; factory, port and rocket preview diffuse textures resolved.",
+    "test_world": "Disposable fixture files and synthetic in-memory terrain only."
+  },
+  "limitations": [
+    "Model previews use static geometry and diffuse lighting; original snow/specular shaders, animation, particles and all attachment behaviors are not reproduced.",
+    "Uses a fixed preview variant; game-state-dependent mesh variant selection is not reproduced.",
+    "No claim of exact live Nudge placement or camera parity. Floating-harbor parity caveats from the earlier coastal investigation still apply.",
+    "Province max greater than one follows the recovered expected-count routine (one missing placement per eligible province) and preserves additional existing records; fresh live-Nudge validation remains outstanding.",
+    "Reads loose game/mod assets; DLC archive mounting and every duplicate-name load-order edge case are not implemented."
+  ]
+}

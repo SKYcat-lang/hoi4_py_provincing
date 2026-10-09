@@ -64,6 +64,7 @@ class StateInfo:
     name: str
     province_ids: list[int] = field(default_factory=list)
     owner: str | None = None
+    impassable: bool = False
 
 
 @dataclass

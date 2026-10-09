@@ -1,0 +1,282 @@
+{
+  "investigation_date": "2026-10-10",
+  "scope": "Read-only static reverse engineering for missing map-building placement generation. No game launch, process injection, executable patch, mod write or production implementation.",
+  "binary": {
+    "path": "D:\\SteamLibrary\\steamapps\\common\\Hearts of Iron IV\\hoi4.exe",
+    "game_version": "1.19.3.0",
+    "sha256": "7dc947be34970da1e1c787bcddbe7f62b610ff258aebf8f06aa8b348f3a031d5",
+    "image_base": "0x140000000",
+    "address_convention": "Preferred virtual address; runtime ASLR can change load base. Analyst labels below are inferred, not recovered symbol names."
+  },
+  "tools": {
+    "pefile": "2024.8.26",
+    "capstone": "5.0.9",
+    "inspection_script": "C:\\Users\\USER-PC\\AppData\\Local\\Temp\\hoi4-nudge-research-20261010\\inspect_nudge.py",
+    "height_check_script": "C:\\Users\\USER-PC\\AppData\\Local\\Temp\\hoi4-nudge-research-20261010\\height_crosscheck.py"
+  },
+  "method": [
+    "Locate source-path/error/UI strings in PE sections.",
+    "Follow RIP-relative references and direct calls.",
+    "Disassemble reachable routines using x64 exception-directory ranges; join contiguous split fragments where control flow continues.",
+    "Cross-reference spawn-point parser tokens and copied fields.",
+    "Cross-check recovered height arithmetic against every seven-field vanilla building/unitstack record."
+  ],
+  "functions": [
+    {
+      "address": "0x1414df9b0",
+      "analyst_label": "Parse spawn-point fields",
+      "observation": "Static confirmation: token 0x4417 writes byte +0x20; type province token 0x2840 writes scope +0x1c=1; state token 0x1b7 writes 0."
+    },
+    {
+      "address": "0x1414df8d0",
+      "analyst_label": "Synthesize spawn point from building",
+      "observation": "Copies building display count, scope, coastal, centered and auto-nudging exclusion fields into spawn-point object."
+    },
+    {
+      "address": "0x140686280",
+      "analyst_label": "Build spawn-point database",
+      "observation": "Creates generated spawn points and processes named spawn points. Named/shared indirection must be resolved before generation."
+    },
+    {
+      "address": "0x141b45650",
+      "analyst_label": "Enumerate nudger templates",
+      "observation": "Enumerates unredirected spawn points and adds the special instance category 1."
+    },
+    {
+      "address": "0x141b4e460",
+      "analyst_label": "Validate and reconcile one state",
+      "observation": "Skips auto-nudging-disabled templates; validates/removes invalid instances; compares expected and existing counts; invokes generator for deficits and has an excess removal branch."
+    },
+    {
+      "address": "0x1416707d0",
+      "analyst_label": "Compute expected instance count",
+      "observation": "Counts land/coastal provinces. State branch returns template maximum (coastal state branch caps by coastal count); provincial/special branch returns eligible province count. Nonstandard provincial max > 1 needs runtime testing: do not blindly multiply province count by max."
+    },
+    {
+      "address": "0x14166fba0",
+      "analyst_label": "Generate an instance",
+      "observation": "Branches between centered and candidate-pixel placement, creates rotation/height, records state/province links. Category 1 dispatches to separate floating-harbor generation."
+    },
+    {
+      "address": "0x141670a80",
+      "analyst_label": "Select candidate pixel",
+      "observation": "Checks land, coastal flag and existing per-province capacity; scans province pixels and eight neighboring samples; inland branch prefers neighbors in same state, coastal branch seeks sea rather than land/lake. Includes fallback passes and an observed index threshold 0x80; precise edge semantics need runtime confirmation."
+    },
+    {
+      "address": "0x141670890",
+      "analyst_label": "Centered province placement",
+      "observation": "Uses province center when inside province; otherwise searches province scanline runs for a nearby inside coordinate; checks existing template instance capacity."
+    },
+    {
+      "address": "0x140a60f10",
+      "analyst_label": "Sample terrain height",
+      "observation": "Subtracts 0.5 from X/Z, clamps base indices to [0,dimension-2], bilinearly interpolates four height samples, multiplies by 0.1, optionally clamps to at least 9.5. Generator calls with clamp enabled."
+    },
+    {
+      "address": "0x1416760f0",
+      "analyst_label": "Select adjacent sea province",
+      "observation": "Iterates adjacency records, rejects land/lake candidates, compares squared distances to sea pixels."
+    },
+    {
+      "address": "0x14166f7b0",
+      "analyst_label": "Generate special category 1 / floating harbor",
+      "observation": "Distinct coastal routine; maintains both water location and associated land province. Preserve type-specific final-column semantics."
+    },
+    {
+      "address": "0x141673ac0",
+      "analyst_label": "Validate instance position and optionally count",
+      "observation": "Checks ordinary instance land placement and membership in target state; special category 1 bypasses ordinary land checks; optional count checks report too few/too many."
+    }
+  ],
+  "confirmed_behavior": [
+    "The Validate path can create missing instances; it is not only an error reporter.",
+    "Validation also has removal branches; missing-only repair should preserve valid instances and explicitly report invalid ones rather than silently reproduce all destructive validation behavior.",
+    "disable_auto_nudging is parsed and checked before reconciliation. Vanilla dams, locks and landmarks use this exclusion.",
+    "Generation operates on resolved spawn-point templates, including generated templates derived from buildings and explicitly named shared templates.",
+    "Terrain height uses bilinear sampling and minimum 9.5 in the investigated generation path.",
+    "Floating harbors have a separate path and cannot use ordinary land-building validation."
+  ],
+  "implementation_proposal": {
+    "provincial_scope": "Fill missing eligible templates only in selected provinces; preserve valid existing placements.",
+    "state_scope": "Calculate deficit against all existing placements in the affected state, then place new state-level instances only in eligible selected provinces. Report lack of eligible positions without changing unselected provinces.",
+    "shared_spawn_points": "Resolve and deduplicate named spawn points before expected counts; do not generate separate coordinates for each building sharing a point.",
+    "excluded_templates": "Leave auto-nudging-disabled placements unchanged and report that manual placement is required.",
+    "randomness": "Use an explicit reproducible seed for the editor; matching original time-dependent random sequences is a separate objective.",
+    "save": "Keep full unrelated file content/records and expose a preview of additions; fix existing state-ID/province-ID confusion before integration."
+  },
+  "limitations": [
+    "Static analysis is not a live Nudge reproduction.",
+    "Function labels and data-structure member meanings include analyst inference.",
+    "Exact random seeding, candidate order, edge wrapping, unusual max > 1 and all centered-state/floating-harbor fallbacks remain to be runtime-tested.",
+    "Height matches do not establish full placement or gameplay equivalence; nonmatching existing heights may be manual or stale.",
+    "No implementation of missing-building generation has been added."
+  ],
+  "height_crosscheck": {
+    "buildings.txt": {
+      "bottom": {
+        "records": 66664,
+        "within_0_011": 65333,
+        "within_0_1": 65934,
+        "median_absolute_error": 1.7763568394002505e-15,
+        "maximum_absolute_error": 3.3549999999999986,
+        "largest_differences": [
+          {
+            "row": 29254,
+            "record": "3;bunker;2931.00;13.73;1459.00;0.21;0",
+            "predicted": 10.700000000000001
+          },
+          {
+            "row": 29265,
+            "record": "3;rocket_site_spawn;2931.00;13.73;1459.00;5.45;0",
+            "predicted": 10.700000000000001
+          },
+          {
+            "row": 29250,
+            "record": "3;supply_node;2922.00;14.05;1454.00;3.59;0",
+            "predicted": 10.825000000000001
+          },
+          {
+            "row": 19806,
+            "record": "800;nuclear_reactor_spawn;3473.99;12.80;1301.36;5.93;0",
+            "predicted": 9.5
+          },
+          {
+            "row": 29241,
+            "record": "3;arms_factory;2935.00;14.03;1459.00;3.66;0",
+            "predicted": 10.675
+          }
+        ]
+      },
+      "top": {
+        "records": 66664,
+        "within_0_011": 4221,
+        "within_0_1": 7093,
+        "median_absolute_error": 1.1500000000000004,
+        "maximum_absolute_error": 14.3
+      }
+    },
+    "unitstacks.txt": {
+      "bottom": {
+        "records": 265355,
+        "within_0_011": 261705,
+        "within_0_1": 263441,
+        "median_absolute_error": 0.0,
+        "maximum_absolute_error": 5.507999999999992,
+        "largest_differences": [
+          {
+            "row": 262819,
+            "record": "10768;38;3617.32;16.55;1249.00;1.57;0.46",
+            "predicted": 12.982000000000017
+          },
+          {
+            "row": 101787,
+            "record": "10768;9;3617.32;16.55;1249.00;1.57;0.46",
+            "predicted": 12.982000000000017
+          },
+          {
+            "row": 159002,
+            "record": "4180;22;381.91;13.50;1022.75;-0.46;0.26",
+            "predicted": 9.5
+          },
+          {
+            "row": 17447,
+            "record": "4180;1;381.91;13.50;1022.75;-0.46;0.26",
+            "predicted": 9.5
+          },
+          {
+            "row": 262826,
+            "record": "10775;38;3433.48;18.00;756.94;-1.57;0.72",
+            "predicted": 12.492000000000008
+          }
+        ]
+      },
+      "top": {
+        "records": 265355,
+        "within_0_011": 61956,
+        "within_0_1": 67229,
+        "median_absolute_error": 0.8000000000000007,
+        "maximum_absolute_error": 14.350000000000001
+      }
+    },
+    "note": "Static-data cross-check only. Existing records may have manual heights or predate the current heightmap; discrepancies are not automatically errors."
+  },
+  "existing_project_issue": {
+    "file": "core/external_files.py",
+    "function": "update_buildings_txt",
+    "finding": "Treats buildings.txt first field as province ID; game uses state ID. Removed province ID can incorrectly delete same-numbered state rows. Not modified in this investigation."
+  },
+  "static_evidence": [
+    {
+      "address": "0x1414df9b0",
+      "label": "Parse spawn-point fields",
+      "disassembly_file": "C:\\Users\\USER-PC\\AppData\\Local\\Temp\\hoi4-nudge-research-20261010\\function_1414df9b0.txt",
+      "sha256": "ab9dc190f042ee4e97f715d0396d516a758963255e4f45dd726c3d7c8ae44510"
+    },
+    {
+      "address": "0x1414df8d0",
+      "label": "Synthesize spawn point from building",
+      "disassembly_file": "C:\\Users\\USER-PC\\AppData\\Local\\Temp\\hoi4-nudge-research-20261010\\function_1414df8d0.txt",
+      "sha256": "b7c07ec91795d10c9b1332165ebd9b6aab325498adaf1df38590d4eb8e43f081"
+    },
+    {
+      "address": "0x140686280",
+      "label": "Build spawn-point database",
+      "disassembly_file": "C:\\Users\\USER-PC\\AppData\\Local\\Temp\\hoi4-nudge-research-20261010\\function_140686280.txt",
+      "sha256": "3ef89bb5f0531b8b2cb98fed0647314a40f9cb3fe499a6703debc121aa1302f8"
+    },
+    {
+      "address": "0x141b45650",
+      "label": "Enumerate nudger templates",
+      "disassembly_file": "C:\\Users\\USER-PC\\AppData\\Local\\Temp\\hoi4-nudge-research-20261010\\function_141b45650.txt",
+      "sha256": "3b71660c5c944471fb0b13704d1c21e10e4a02e662634eab4e82c37d66caeaf9"
+    },
+    {
+      "address": "0x141b4e460",
+      "label": "Validate and reconcile one state",
+      "disassembly_file": "C:\\Users\\USER-PC\\AppData\\Local\\Temp\\hoi4-nudge-research-20261010\\function_141b4e460.txt",
+      "sha256": "374fc791fcf70f79c18f99ec968384632b255b4db7a1224cbbb26d65315d1a09"
+    },
+    {
+      "address": "0x1416707d0",
+      "label": "Compute expected instance count",
+      "disassembly_file": "C:\\Users\\USER-PC\\AppData\\Local\\Temp\\hoi4-nudge-research-20261010\\function_1416707d0.txt",
+      "sha256": "9c178acf6cf3f62740cd9c11f712397646a0f76eee025e1f4df41b7f400bf763"
+    },
+    {
+      "address": "0x14166fba0",
+      "label": "Generate an instance",
+      "disassembly_file": "C:\\Users\\USER-PC\\AppData\\Local\\Temp\\hoi4-nudge-research-20261010\\function_14166fba0.txt",
+      "sha256": "07b0ba1849d8a0201fa1a8e9d1527759d6684a8dbc65d28229875cb908c27ad0"
+    },
+    {
+      "address": "0x141670a80",
+      "label": "Select candidate pixel",
+      "disassembly_file": "C:\\Users\\USER-PC\\AppData\\Local\\Temp\\hoi4-nudge-research-20261010\\function_141670a80.txt",
+      "sha256": "b5fa134bcfd0ccd195118b9a0d3c39ef829a0fdff6e34d6e38c402e9b8349244"
+    },
+    {
+      "address": "0x140a60f10",
+      "label": "Sample terrain height",
+      "disassembly_file": "C:\\Users\\USER-PC\\AppData\\Local\\Temp\\hoi4-nudge-research-20261010\\function_140a60f10.txt",
+      "sha256": "da6c040da70ba0e43918ca54227cebc614cb6d4bb4c3445dca200b275ac99785"
+    },
+    {
+      "address": "0x1416760f0",
+      "label": "Select adjacent sea province",
+      "disassembly_file": "C:\\Users\\USER-PC\\AppData\\Local\\Temp\\hoi4-nudge-research-20261010\\function_1416760f0.txt",
+      "sha256": "a8cdd99afe9603407d00a213f0d728eab144b06ef4d6af7932f01117cd68ac4a"
+    },
+    {
+      "address": "0x14166f7b0",
+      "label": "Generate special category 1 / floating harbor",
+      "disassembly_file": "C:\\Users\\USER-PC\\AppData\\Local\\Temp\\hoi4-nudge-research-20261010\\function_14166f7b0.txt",
+      "sha256": "d4798118e913edd8e6b0d3587ae5da723274d8bb7a586d1d7bed7269f857a67e"
+    },
+    {
+      "address": "0x141673ac0",
+      "label": "Validate instance position and optionally count",
+      "disassembly_file": "C:\\Users\\USER-PC\\AppData\\Local\\Temp\\hoi4-nudge-research-20261010\\function_141673ac0.txt",
+      "sha256": "e734eaffd77e4787100032e87b768d81a07326df4296488d04e83f51abf909eb"
+    }
+  ]
+}

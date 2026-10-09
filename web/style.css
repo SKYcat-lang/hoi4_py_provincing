@@ -481,7 +481,7 @@ input[type="range"] {
 .country-border-color {
   background: #ffff00;
 }
-#country-fill-canvas, #province-id-colors-canvas {
+#country-fill-canvas, #province-id-colors-canvas, #impassable-overlay-canvas {
   position: absolute;
   top: 0;
   left: 0;

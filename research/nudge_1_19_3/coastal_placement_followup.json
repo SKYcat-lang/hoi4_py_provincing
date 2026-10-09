@@ -1,0 +1,31 @@
+{
+  "date": "2026-10-10",
+  "binary_version": "1.19.3.0",
+  "scope": "Read-only static analysis and installed vanilla map comparison supporting the building editor correction.",
+  "evidence": [
+    {"address": "0x14140a3c0..0x14140a498", "finding": "Province center is the integer-truncated average of all scanline pixel coordinates."},
+    {"address": "0x141409220..0x1414095cd", "finding": "Process each adjacency pair from its lower-ID side. Gather unique source-side pixels having a cardinal neighbor in the other province."},
+    {"address": "0x141409660..0x141409a47", "finding": "Flood-fill border pixels with eight-neighbor connectivity; retain the largest component."},
+    {"address": "0x141409b2d..0x141409bdd; 0x1424ed730", "finding": "Average the component using fixed-point contributions; convert to integer by rounding. Store the resulting shared adjacency anchor at +0x20."},
+    {"address": "0x1416760f0", "finding": "Select an actual adjacent sea (excluding land/lake) by its closest pixel to the supplied point."},
+    {"address": "0x1416700e5..0x141670131", "finding": "Ordinary coastal rotation uses atan2(land_center_z - anchor_z, land_center_x - anchor_x) - pi/2."},
+    {"address": "0x14166f901..0x14166fa44", "finding": "Floating harbor: normalize anchor minus land center, multiply by define distance, add anchor. Accept only inside selected sea; otherwise use sea center. Rotation is atan2(position_z - anchor_z, position_x - anchor_x) - pi/2."},
+    {"file": "common/defines/00_graphics.lua:1310", "finding": "NGraphics.DEFAULT_NUDGE_FLOATING_HARBOR_DIST = 7.0, documented as distance from coast in pixels for nudger."}
+  ],
+  "editor_differences": [
+    "If the sea-center fallback is outside its own concave sea, the editor snaps to that sea's nearest actual pixel to preserve valid output.",
+    "Horizontal seam directions use the shortest wrapped difference. Exact engine behavior for all seam-center cases is not established.",
+    "The engine's equal-distance sea ordering and equal-size coast-component ordering may differ from our deterministic ordering.",
+    "Ordinary port positions still use eligible shoreline candidates; matching the original random sequence is outside scope."
+  ],
+  "validation": {
+    "script": "check_coastal_placements.py",
+    "result": "coastal_vanilla_comparison.json",
+    "sample": "First 100 floating_harbor records in the installed vanilla buildings.txt",
+    "position_within_0_02_pixels": 56,
+    "rotation_within_0_01_radians": 53,
+    "all_positions_in_adjacent_sea": true,
+    "interpretation": "Partial agreement only. Existing shipped placements are not a fresh live Nudge run. Differences may involve historical/manual records or unrecovered engine details; their cause is not established.",
+    "live_nudge_comparison": "Not performed. Do not claim exact vanilla parity."
+  }
+}
