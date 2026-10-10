@@ -43,7 +43,7 @@ class BuildingEditorTests(unittest.TestCase):
         editor.save()
         output = self.path.read_bytes()
         self.assertTrue(output.startswith(b'\xef\xbb\xbf# header\r\n'))
-        self.assertIn(b'# keep\r\nopaque malformed\r\n', output)
+        self.assertTrue(output.endswith(b'# keep\r\nopaque malformed'))
         self.assertIn(b'1.60;11.00;2.50', output)
         editor.apply(result['before'])
         editor.save()

@@ -130,7 +130,8 @@ def update_buildings_txt(path: str, removed_ids: set[int]) -> dict:
     if removed == 0:
         return {"changed": False, "removedLines": 0, "remappedTokens": 0}
 
-    _write_text(path, nl.join(out), enc)
+    # Removing the final record must not leave an empty building row at EOF.
+    _write_text(path, nl.join(out).rstrip('\r\n'), enc)
     return {"changed": True, "removedLines": removed, "remappedTokens": 0}
 
 

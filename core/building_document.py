@@ -80,6 +80,15 @@ class BuildingDocument:
                     previous_id, previous_line = lines[-1]
                     lines[-1] = previous_id, previous_line + self.newline
                 lines.append((identifier, formatted(record)))
+        # HOI4 treats a trailing line separator as an empty building record.
+        # Keep internal line endings, but terminate the file at its last content.
+        while lines:
+            identifier, last_line = lines[-1]
+            last_line = last_line.rstrip('\r\n')
+            if last_line:
+                lines[-1] = identifier, last_line
+                break
+            lines.pop()
         raw = ''.join(line for _, line in lines).encode(self.encoding)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         descriptor, temporary = tempfile.mkstemp(dir=self.path.parent, suffix='.tmp')
